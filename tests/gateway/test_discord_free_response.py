@@ -294,6 +294,45 @@ async def test_discord_auto_thread_can_be_disabled(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discord_no_auto_thread_channels(adapter, monkeypatch):
+    """Channels in DISCORD_NO_AUTO_THREAD_CHANNELS should skip auto-threading."""
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_NO_AUTO_THREAD_CHANNELS", "123,456")
+
+    adapter._auto_create_thread = AsyncMock()
+
+    # Channel 123 is excluded — should NOT auto-thread
+    message = make_message(channel=FakeTextChannel(channel_id=123), content="hello")
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_type == "group"
+
+
+@pytest.mark.asyncio
+async def test_discord_no_auto_thread_channels_allows_others(adapter, monkeypatch):
+    """Channels NOT in the exclusion list should still auto-thread normally."""
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_NO_AUTO_THREAD_CHANNELS", "999")
+
+    fake_thread = FakeThread(channel_id=888, name="auto-thread")
+    adapter._auto_create_thread = AsyncMock(return_value=fake_thread)
+
+    # Channel 123 is NOT excluded — should auto-thread
+    message = make_message(channel=FakeTextChannel(channel_id=123), content="hello")
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_awaited_once()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_type == "thread"
+
+
+@pytest.mark.asyncio
 async def test_discord_bot_thread_skips_mention_requirement(adapter, monkeypatch):
     """Messages in a thread the bot has participated in should not require @mention."""
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")

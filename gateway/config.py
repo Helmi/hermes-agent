@@ -547,6 +547,11 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
                 if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
                     os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+                natc = discord_cfg.get("no_auto_thread_channels")
+                if natc is not None and not os.getenv("DISCORD_NO_AUTO_THREAD_CHANNELS"):
+                    if isinstance(natc, list):
+                        natc = ",".join(str(v) for v in natc)
+                    os.environ["DISCORD_NO_AUTO_THREAD_CHANNELS"] = str(natc)
                 if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
                     os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
 

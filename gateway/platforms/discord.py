@@ -1989,6 +1989,7 @@ class DiscordAdapter(BasePlatformAdapter):
         #   discord.require_mention: Require @mention in server channels (default: true)
         #   discord.free_response_channels: Channel IDs where bot responds without mention
         #   discord.auto_thread: Auto-create thread on @mention in channels (default: true)
+        #   discord.no_auto_thread_channels: Channel IDs excluded from auto-threading
 
         thread_id = None
         parent_channel_id = None
@@ -2022,9 +2023,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
         # Messages already inside threads or DMs are unaffected.
+        # Channels listed in DISCORD_NO_AUTO_THREAD_CHANNELS are excluded.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in ("true", "1", "yes")
+            if auto_thread:
+                no_auto_thread_raw = os.getenv("DISCORD_NO_AUTO_THREAD_CHANNELS", "")
+                no_auto_thread_channels = {ch.strip() for ch in no_auto_thread_raw.split(",") if ch.strip()}
+                if str(message.channel.id) in no_auto_thread_channels:
+                    auto_thread = False
             if auto_thread:
                 thread = await self._auto_create_thread(message)
                 if thread:
