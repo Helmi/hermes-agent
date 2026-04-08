@@ -1,6 +1,7 @@
 """SSH remote execution environment with ControlMaster connection persistence."""
 
 import logging
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -135,9 +136,8 @@ class SSHEnvironment(PersistentShellMixin, BaseEnvironment):
                 else:
                     logger.debug("SSH: rsync credential failed: %s", result.stderr.strip())
 
-            # Sync skills directory (remap to detected home)
-            skills_mount = get_skills_directory_mount(container_base=container_base)
-            if skills_mount:
+            # Sync skill directories (local + external, remap to detected home)
+            for skills_mount in get_skills_directory_mount(container_base=container_base):
                 remote_path = skills_mount["container_path"]
                 mkdir_cmd = self._build_ssh_command()
                 mkdir_cmd.append(f"mkdir -p {remote_path}")
@@ -229,7 +229,13 @@ class SSHEnvironment(PersistentShellMixin, BaseEnvironment):
                          stdin_data: str | None = None) -> dict:
         work_dir = cwd or self.cwd
         exec_command, sudo_stdin = self._prepare_command(command)
-        wrapped = f'cd {work_dir} && {exec_command}'
+        # Keep ~ unquoted (for shell expansion) and quote only the subpath.
+        if work_dir == "~":
+            wrapped = f'cd ~ && {exec_command}'
+        elif work_dir.startswith("~/"):
+            wrapped = f'cd ~/{shlex.quote(work_dir[2:])} && {exec_command}'
+        else:
+            wrapped = f'cd {shlex.quote(work_dir)} && {exec_command}'
         effective_timeout = timeout or self.timeout
 
         if sudo_stdin is not None and stdin_data is not None:

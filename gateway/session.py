@@ -254,8 +254,22 @@ def build_session_context_prompt(
     if context.source.chat_topic:
         lines.append(f"**Channel Topic:** {context.source.chat_topic}")
 
-    # User identity (especially useful for WhatsApp where multiple people DM)
-    if context.source.user_name:
+    # User identity.
+    # In shared thread sessions (non-DM with thread_id), multiple users
+    # contribute to the same conversation.  Don't pin a single user name
+    # in the system prompt — it changes per-turn and would bust the prompt
+    # cache.  Instead, note that this is a multi-user thread; individual
+    # sender names are prefixed on each user message by the gateway.
+    _is_shared_thread = (
+        context.source.chat_type != "dm"
+        and context.source.thread_id
+    )
+    if _is_shared_thread:
+        lines.append(
+            "**Session type:** Multi-user thread — messages are prefixed "
+            "with [sender name]. Multiple users may participate."
+        )
+    elif context.source.user_name:
         lines.append(f"**User:** {context.source.user_name}")
     elif context.source.user_id:
         uid = context.source.user_id
@@ -427,7 +441,11 @@ class SessionEntry:
         )
 
 
-def build_session_key(source: SessionSource, group_sessions_per_user: bool = True) -> str:
+def build_session_key(
+    source: SessionSource,
+    group_sessions_per_user: bool = True,
+    thread_sessions_per_user: bool = False,
+) -> str:
     """Build a deterministic session key from a message source.
 
     This is the single source of truth for session key construction.
@@ -442,7 +460,11 @@ def build_session_key(source: SessionSource, group_sessions_per_user: bool = Tru
       - chat_id identifies the parent group/channel.
       - user_id/user_id_alt isolates participants within that parent chat when available when
         ``group_sessions_per_user`` is enabled.
-      - thread_id differentiates threads within that parent chat.
+      - thread_id differentiates threads within that parent chat.  When
+        ``thread_sessions_per_user`` is False (default), threads are *shared* across all
+        participants — user_id is NOT appended, so every user in the thread
+        shares a single session.  This is the expected UX for threaded
+        conversations (Telegram forum topics, Discord threads, Slack threads).
       - Without participant identifiers, or when isolation is disabled, messages fall back to one
         shared session per chat.
       - Without identifiers, messages fall back to one session per platform/chat_type.
@@ -464,7 +486,15 @@ def build_session_key(source: SessionSource, group_sessions_per_user: bool = Tru
         key_parts.append(source.chat_id)
     if source.thread_id:
         key_parts.append(source.thread_id)
-    if group_sessions_per_user and participant_id:
+
+    # In threads, default to shared sessions (all participants see the same
+    # conversation).  Per-user isolation only applies when explicitly enabled
+    # via thread_sessions_per_user, or when there is no thread (regular group).
+    isolate_user = group_sessions_per_user
+    if source.thread_id and not thread_sessions_per_user:
+        isolate_user = False
+
+    if isolate_user and participant_id:
         key_parts.append(str(participant_id))
 
     return ":".join(key_parts)
@@ -552,6 +582,7 @@ class SessionStore:
         return build_session_key(
             source,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
@@ -778,66 +809,18 @@ class SessionStore:
     def update_session(
         self,
         session_key: str,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
-        cache_read_tokens: int = 0,
-        cache_write_tokens: int = 0,
         last_prompt_tokens: int = None,
-        model: str = None,
-        estimated_cost_usd: Optional[float] = None,
-        cost_status: Optional[str] = None,
-        cost_source: Optional[str] = None,
-        provider: Optional[str] = None,
-        base_url: Optional[str] = None,
     ) -> None:
-        """Update a session's metadata after an interaction."""
-        db_session_id = None
-
+        """Update lightweight session metadata after an interaction."""
         with self._lock:
             self._ensure_loaded_locked()
 
             if session_key in self._entries:
                 entry = self._entries[session_key]
                 entry.updated_at = _now()
-                # Direct assignment — the gateway receives cumulative totals
-                # from the cached agent, not per-call deltas.
-                entry.input_tokens = input_tokens
-                entry.output_tokens = output_tokens
-                entry.cache_read_tokens = cache_read_tokens
-                entry.cache_write_tokens = cache_write_tokens
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
-                if estimated_cost_usd is not None:
-                    entry.estimated_cost_usd = estimated_cost_usd
-                if cost_status:
-                    entry.cost_status = cost_status
-                entry.total_tokens = (
-                    entry.input_tokens
-                    + entry.output_tokens
-                    + entry.cache_read_tokens
-                    + entry.cache_write_tokens
-                )
                 self._save()
-                db_session_id = entry.session_id
-
-        if self._db and db_session_id:
-            try:
-                self._db.set_token_counts(
-                    db_session_id,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    cost_status=cost_status,
-                    cost_source=cost_source,
-                    billing_provider=provider,
-                    billing_base_url=base_url,
-                    model=model,
-                    absolute=True,
-                )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""

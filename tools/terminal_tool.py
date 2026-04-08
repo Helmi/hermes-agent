@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import platform
+import re
 import time
 import threading
 import atexit
@@ -141,16 +142,38 @@ from tools.approval import (
 )
 
 
-def _check_dangerous_command(command: str, env_type: str) -> dict:
-    """Delegate to the consolidated approval module, passing the CLI callback."""
-    return _check_dangerous_command_impl(command, env_type,
-                                         approval_callback=_approval_callback)
-
-
 def _check_all_guards(command: str, env_type: str) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
                                   approval_callback=_approval_callback)
+
+
+# Allowlist: characters that can legitimately appear in directory paths.
+# Covers alphanumeric, path separators, tilde, dot, hyphen, underscore, space,
+# plus, at, equals, and comma.  Everything else is rejected.
+_WORKDIR_SAFE_RE = re.compile(r'^[A-Za-z0-9/_\-.~ +@=,]+$')
+
+
+def _validate_workdir(workdir: str) -> str | None:
+    """Reject workdir values that don't look like a filesystem path.
+
+    Uses an allowlist of safe characters rather than a deny-list, so novel
+    shell metacharacters can't slip through.
+
+    Returns None if safe, or an error message string if dangerous.
+    """
+    if not workdir:
+        return None
+    if not _WORKDIR_SAFE_RE.match(workdir):
+        # Find the first offending character for a helpful message.
+        for ch in workdir:
+            if not _WORKDIR_SAFE_RE.match(ch):
+                return (
+                    f"Blocked: workdir contains disallowed character {repr(ch)}. "
+                    "Use a simple filesystem path without shell metacharacters."
+                )
+        return "Blocked: workdir contains disallowed characters."
+    return None
 
 
 def _handle_sudo_failure(output: str, env_type: str) -> str:
@@ -392,9 +415,11 @@ Do NOT use sed/awk to edit files — use patch instead.
 Do NOT use echo/cat heredoc to create files — use write_file instead.
 Reserve terminal for: builds, installs, git, processes, scripts, network, package managers, and anything that needs a shell.
 
-Foreground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for everything that finishes.
-Background: ONLY for long-running servers, watchers, or processes that never exit. Set background=true to get a session_id, then use process(action="wait") to block until done — it returns instantly on completion, same as foreground. Use process(action="poll") only when you need a progress check without blocking.
-Do NOT use background for scripts, builds, or installs — foreground with a generous timeout is always better (fewer tool calls, instant results).
+Foreground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for short commands.
+Background: Set background=true to get a session_id. Two patterns:
+  (1) Long-lived processes that never exit (servers, watchers).
+  (2) Long-running tasks with notify_on_complete=true — you can keep working on other things and the system auto-notifies you when the task finishes. Great for test suites, builds, deployments, or anything that takes more than a minute.
+Use process(action="poll") for progress checks, process(action="wait") to block until done.
 Working directory: Use 'workdir' for per-command cwd.
 PTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).
 
@@ -583,6 +608,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     persistent = cc.get("container_persistent", True)
     volumes = cc.get("docker_volumes", [])
     docker_forward_env = cc.get("docker_forward_env", [])
+    docker_env = cc.get("docker_env", {})
 
     if env_type == "local":
         lc = local_config or {}
@@ -598,6 +624,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             host_cwd=host_cwd,
             auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
             forward_env=docker_forward_env,
+            env=docker_env,
         )
     
     elif env_type == "singularity":
@@ -687,8 +714,6 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     """Clean up environments that have been inactive for longer than lifetime_seconds."""
-    global _active_environments, _last_activity
-
     current_time = time.time()
 
     # Check the process registry -- skip cleanup for sandboxes with active
@@ -751,8 +776,6 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
 
 def _cleanup_thread_worker():
     """Background thread worker that periodically cleans up inactive environments."""
-    global _cleanup_running
-
     while _cleanup_running:
         try:
             config = _get_env_config()
@@ -788,6 +811,12 @@ def _stop_cleanup_thread():
             pass
 
 
+def get_active_env(task_id: str):
+    """Return the active BaseEnvironment for *task_id*, or None."""
+    with _env_lock:
+        return _active_environments.get(task_id)
+
+
 def get_active_environments_info() -> Dict[str, Any]:
     """Get information about currently active environments."""
     info = {
@@ -798,7 +827,7 @@ def get_active_environments_info() -> Dict[str, Any]:
     
     # Calculate total disk usage (per-task to avoid double-counting)
     total_size = 0
-    for task_id in _active_environments.keys():
+    for task_id in _active_environments:
         scratch_dir = _get_scratch_dir()
         pattern = f"hermes-*{task_id[:8]}*"
         import glob
@@ -815,8 +844,6 @@ def get_active_environments_info() -> Dict[str, Any]:
 
 def cleanup_all_environments():
     """Clean up ALL active environments. Use with caution."""
-    global _active_environments, _last_activity
-    
     task_ids = list(_active_environments.keys())
     cleaned = 0
     
@@ -844,8 +871,6 @@ def cleanup_all_environments():
 
 def cleanup_vm(task_id: str):
     """Manually clean up a specific environment by task_id."""
-    global _active_environments, _last_activity
-
     # Remove from tracking dicts while holding the lock, but defer the
     # actual (potentially slow) env.cleanup() call to outside the lock
     # so other tool calls aren't blocked.
@@ -897,6 +922,78 @@ def _atexit_cleanup():
 atexit.register(_atexit_cleanup)
 
 
+# =============================================================================
+# Exit Code Context for Common CLI Tools
+# =============================================================================
+# Many Unix commands use non-zero exit codes for informational purposes, not
+# to indicate failure.  The model sees a raw exit_code=1 from `grep` and
+# wastes a turn investigating something that just means "no matches".
+# This lookup adds a human-readable note so the agent can move on.
+
+def _interpret_exit_code(command: str, exit_code: int) -> str | None:
+    """Return a human-readable note when a non-zero exit code is non-erroneous.
+
+    Returns None when the exit code is 0 or genuinely signals an error.
+    The note is appended to the tool result so the model doesn't waste
+    turns investigating expected exit codes.
+    """
+    if exit_code == 0:
+        return None
+
+    # Extract the last command in a pipeline/chain — that determines the
+    # exit code.  Handles  `cmd1 && cmd2`, `cmd1 | cmd2`, `cmd1; cmd2`.
+    # Deliberately simple: split on shell operators and take the last piece.
+    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
+    last_segment = (segments[-1] if segments else command).strip()
+
+    # Get base command name (first word), stripping env var assignments
+    # like  VAR=val cmd ...
+    words = last_segment.split()
+    base_cmd = ""
+    for w in words:
+        if "=" in w and not w.startswith("-"):
+            continue  # skip VAR=val
+        base_cmd = w.split("/")[-1]  # handle /usr/bin/grep -> grep
+        break
+
+    if not base_cmd:
+        return None
+
+    # Command-specific semantics
+    semantics: dict[str, dict[int, str]] = {
+        # grep/rg/ag/ack: 1=no matches found (normal), 2+=real error
+        "grep":  {1: "No matches found (not an error)"},
+        "egrep": {1: "No matches found (not an error)"},
+        "fgrep": {1: "No matches found (not an error)"},
+        "rg":    {1: "No matches found (not an error)"},
+        "ag":    {1: "No matches found (not an error)"},
+        "ack":   {1: "No matches found (not an error)"},
+        # diff: 1=files differ (expected), 2+=real error
+        "diff":  {1: "Files differ (expected, not an error)"},
+        "colordiff": {1: "Files differ (expected, not an error)"},
+        # find: 1=some dirs inaccessible but results may still be valid
+        "find":  {1: "Some directories were inaccessible (partial results may still be valid)"},
+        # test/[: 1=condition is false (expected)
+        "test":  {1: "Condition evaluated to false (expected, not an error)"},
+        "[":     {1: "Condition evaluated to false (expected, not an error)"},
+        # curl: common non-error codes
+        "curl":  {
+            6: "Could not resolve host",
+            7: "Failed to connect to host",
+            22: "HTTP response code indicated error (e.g. 404, 500)",
+            28: "Operation timed out",
+        },
+        # git: 1 is context-dependent but often normal (e.g. git diff with changes)
+        "git":   {1: "Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)"},
+    }
+
+    cmd_semantics = semantics.get(base_cmd)
+    if cmd_semantics and exit_code in cmd_semantics:
+        return cmd_semantics[exit_code]
+
+    return None
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -906,6 +1003,7 @@ def terminal_tool(
     workdir: Optional[str] = None,
     check_interval: Optional[int] = None,
     pty: bool = False,
+    notify_on_complete: bool = False,
 ) -> str:
     """
     Execute a command in the configured terminal environment.
@@ -919,6 +1017,7 @@ def terminal_tool(
         workdir: Working directory for this command (optional, uses session cwd if not set)
         check_interval: Seconds between auto-checks for background processes (gateway only, min 30)
         pty: If True, use pseudo-terminal for interactive CLI tools (local backend only)
+        notify_on_complete: If True and background=True, auto-notify the agent when the process exits
 
     Returns:
         str: JSON string with output, exit_code, and error fields
@@ -936,8 +1035,6 @@ def terminal_tool(
         # Force run after user confirmation
         # Note: force parameter is internal only, not exposed to model API
     """
-    global _active_environments, _last_activity
-
     try:
         # Get configuration
         config = _get_env_config()
@@ -1056,6 +1153,7 @@ def terminal_tool(
 
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
+        approval_note = None
         if not force:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
@@ -1082,15 +1180,36 @@ def terminal_tool(
                     "error": approval.get("message", fallback_msg),
                     "status": "blocked"
                 }, ensure_ascii=False)
+            # Track whether approval was explicitly granted by the user
+            if approval.get("user_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command required approval ({desc}) and was approved by the user."
+            elif approval.get("smart_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
+
+        # Validate workdir against shell injection
+        if workdir:
+            workdir_error = _validate_workdir(workdir)
+            if workdir_error:
+                logger.warning("Blocked dangerous workdir: %s (command: %s)",
+                               workdir[:200], command[:200])
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": workdir_error,
+                    "status": "blocked"
+                }, ensure_ascii=False)
 
         # Prepare command for execution
         if background:
             # Spawn a tracked background process via the process registry.
             # For local backends: uses subprocess.Popen with output buffering.
             # For non-local backends: runs inside the sandbox via env.execute().
+            from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
 
-            session_key = os.getenv("HERMES_SESSION_KEY", "")
+            session_key = get_current_session_key(default="")
             effective_cwd = workdir or cwd
             try:
                 if env_type == "local":
@@ -1118,6 +1237,8 @@ def terminal_tool(
                     "exit_code": 0,
                     "error": None,
                 }
+                if approval_note:
+                    result_data["approval"] = approval_note
 
                 # Transparent timeout clamping note
                 max_timeout = effective_timeout
@@ -1126,6 +1247,32 @@ def terminal_tool(
                         f"Requested timeout {timeout}s was clamped to "
                         f"configured limit of {max_timeout}s"
                     )
+
+                # Mark for agent notification on completion
+                if notify_on_complete and background:
+                    proc_session.notify_on_complete = True
+                    result_data["notify_on_complete"] = True
+
+                    # In gateway mode, auto-register a fast watcher so the
+                    # gateway can detect completion and trigger a new agent
+                    # turn.  CLI mode uses the completion_queue directly.
+                    _gw_platform = os.getenv("HERMES_SESSION_PLATFORM", "")
+                    if _gw_platform and not check_interval:
+                        _gw_chat_id = os.getenv("HERMES_SESSION_CHAT_ID", "")
+                        _gw_thread_id = os.getenv("HERMES_SESSION_THREAD_ID", "")
+                        proc_session.watcher_platform = _gw_platform
+                        proc_session.watcher_chat_id = _gw_chat_id
+                        proc_session.watcher_thread_id = _gw_thread_id
+                        proc_session.watcher_interval = 5
+                        process_registry.pending_watchers.append({
+                            "session_id": proc_session.id,
+                            "check_interval": 5,
+                            "session_key": session_key,
+                            "platform": _gw_platform,
+                            "chat_id": _gw_chat_id,
+                            "thread_id": _gw_thread_id,
+                            "notify_on_complete": True,
+                        })
 
                 # Register check_interval watcher (gateway picks this up after agent run)
                 if check_interval and background:
@@ -1229,11 +1376,21 @@ def terminal_tool(
             from agent.redact import redact_sensitive_text
             output = redact_sensitive_text(output.strip()) if output else ""
 
-            return json.dumps({
+            # Interpret non-zero exit codes that aren't real errors
+            # (e.g. grep=1 means "no matches", diff=1 means "files differ")
+            exit_note = _interpret_exit_code(command, returncode)
+
+            result_dict = {
                 "output": output,
                 "exit_code": returncode,
-                "error": None
-            }, ensure_ascii=False)
+                "error": None,
+            }
+            if approval_note:
+                result_dict["approval"] = approval_note
+            if exit_note:
+                result_dict["exit_code_meaning"] = exit_note
+
+            return json.dumps(result_dict, ensure_ascii=False)
 
     except Exception as e:
         import traceback
@@ -1413,7 +1570,7 @@ TERMINAL_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "ONLY for servers/watchers that never exit. For scripts, builds, installs — use foreground with timeout instead (it returns instantly when done).",
+                "description": "Run the command in the background. Two patterns: (1) Long-lived processes that never exit (servers, watchers). (2) Long-running tasks paired with notify_on_complete=true — you can keep working and get notified when the task finishes. For short commands, prefer foreground with a generous timeout instead.",
                 "default": False
             },
             "timeout": {
@@ -1434,6 +1591,11 @@ TERMINAL_SCHEMA = {
                 "type": "boolean",
                 "description": "Run in pseudo-terminal (PTY) mode for interactive CLI tools like Codex, Claude Code, or Python REPL. Only works with local and SSH backends. Default: false.",
                 "default": False
+            },
+            "notify_on_complete": {
+                "type": "boolean",
+                "description": "When true (and background=true), you'll be automatically notified when the process finishes — no polling needed. Use this for tasks that take a while (tests, builds, deployments) so you can keep working on other things in the meantime.",
+                "default": False
             }
         },
         "required": ["command"]
@@ -1450,6 +1612,7 @@ def _handle_terminal(args, **kw):
         workdir=args.get("workdir"),
         check_interval=args.get("check_interval"),
         pty=args.get("pty", False),
+        notify_on_complete=args.get("notify_on_complete", False),
     )
 
 
@@ -1460,4 +1623,5 @@ registry.register(
     handler=_handle_terminal,
     check_fn=check_terminal_requirements,
     emoji="💻",
+    max_result_size_chars=100_000,
 )
