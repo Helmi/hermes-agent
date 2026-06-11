@@ -13,7 +13,7 @@ import hashlib
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-from agent.skill_utils import is_excluded_skill_path
+from agent.skill_utils import iter_skill_index_files, is_excluded_skill_path
 from tools.skills_guard import ScanResult, content_hash
 from tools.skills_hub_github import GitHubAuth
 from tools.skills_hub_models import (
@@ -91,7 +91,7 @@ def _category_skill_dirs(directory: Path) -> List[str]:
         entry.name for entry in directory.iterdir()
         if entry.is_dir() and not entry.name.startswith(".") and any(
             not is_excluded_skill_path(skill_md.relative_to(directory), root=directory)
-            for skill_md in entry.rglob("SKILL.md")
+            for skill_md in iter_skill_index_files(entry, "SKILL.md")
         )
     ]
 

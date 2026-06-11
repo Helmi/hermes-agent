@@ -251,7 +251,8 @@ class OptionalSkillSource(SkillSource):
 
     def _local_skill_mds(self):
         root = self._optional_dir
-        return (md for md in (sorted(root.rglob("SKILL.md")) if root.is_dir() else [])
+        from agent.skill_utils import iter_skill_index_files
+        return (md for md in (iter_skill_index_files(root, "SKILL.md") if root.is_dir() else [])
                 if not is_excluded_skill_path(md.relative_to(root), root=root))
 
     def _find_skill_dir(self, name: str) -> Optional[Path]:

@@ -267,6 +267,7 @@ def _existing_categories() -> List[str]:
                       if not (SKILLS_DIR / name / "SKILL.md").exists())
     except OSError:  # FileNotFoundError is an OSError
         return []
+    return sorted(set(out))
 
 
 def _line_input(prompt: str) -> Optional[str]:
