@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
+from agent.skill_utils import iter_skill_index_files
 
 _SKIP_PARTS = {".archive", ".hub", "node_modules", ".git"}
 _USAGE_TS_KEYS = ("last_activity_at", "last_used_at", "last_viewed_at", "last_patched_at", "created_at")
@@ -82,7 +83,7 @@ def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNod
     usage = _load_usage()
     nodes: dict[str, SkillNode] = {}
     for source, root in skill_roots:
-        for skill_md in root.rglob("SKILL.md") if root.exists() else ():
+        for skill_md in iter_skill_index_files(root, "SKILL.md") if root.exists() else ():
             if _SKIP_PARTS.intersection(skill_md.parts):
                 continue
             try:

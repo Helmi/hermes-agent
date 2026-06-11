@@ -23,7 +23,7 @@ for _stream in (sys.stdout, sys.stderr):
         with suppress(ValueError, TypeError):
             _stream.reconfigure(encoding="utf-8", errors="replace")
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
-from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path
+from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path, iter_skill_index_files
 from tools.skill_usage import _read_skill_name, read_suppressed_names
 from tools.skills_sync_optional import (
     _backfill_optional_provenance, _ignore_runtime_cache, _is_runtime_cache, _read_hub_install_paths,
@@ -85,7 +85,8 @@ def _rel_skills_posix(path: Path) -> str:
 
 def _iter_skill_mds(root: Path, sort: bool = False) -> Iterator[Path]:
     """Yield every non-excluded SKILL.md under ``root`` (nothing when it does not exist)."""
-    found = root.rglob("SKILL.md") if root.exists() else iter(())
+    from agent.skill_utils import iter_skill_index_files
+    found = iter_skill_index_files(root, "SKILL.md") if root.exists() else iter(())
     for skill_md in sorted(found) if sort else found:
         if not is_excluded_skill_path(skill_md):
             yield skill_md
@@ -142,8 +143,7 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
         return []
     return [
         (_read_skill_name(md, md.parent.name), md.parent)
-        for md in bundled_dir.rglob("SKILL.md")
-        if not is_excluded_skill_path(md.relative_to(bundled_dir), root=bundled_dir)]
+        for md in iter_skill_index_files(bundled_dir, "SKILL.md")]
 
 
 def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:

@@ -15,9 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from agent.skill_utils import is_excluded_skill_path
-from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
-from hermes_constants import clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
+from agent.skill_utils import iter_skill_index_files
+from hermes_cli.archive_safe import (
+    archive_root_dirs,
+    make_targz,
+    normalize_archive_parts,
+    safe_extract_targz,
+)
+from hermes_constants import (
+    clear_named_profile_deleted,
+    mark_named_profile_deleted,
+    named_profile_is_deleted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -602,7 +611,8 @@ def _count_skills(profile_dir: Path) -> int:
     cached = _SKILL_COUNT_CACHE.get(key)
     if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS:
         return cached[2]
-    count = sum(1 for md in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(md))
+
+    count = sum(1 for _ in iter_skill_index_files(skills_dir, "SKILL.md"))
     _SKILL_COUNT_CACHE[key] = (signature, now, count)
     return count
 
