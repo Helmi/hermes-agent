@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
-from agent.skill_utils import is_excluded_skill_path
+from agent.skill_utils import iter_skill_index_files
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunparse
 
@@ -3602,11 +3602,7 @@ class OptionalSkillSource(SkillSource):
         """Find a skill directory by name anywhere in optional-skills/."""
         if not self._optional_dir.is_dir():
             return None
-        for skill_md in self._optional_dir.rglob("SKILL.md"):
-            if is_excluded_skill_path(
-                skill_md.relative_to(self._optional_dir), root=self._optional_dir
-            ):
-                continue
+        for skill_md in iter_skill_index_files(self._optional_dir, "SKILL.md"):
             if skill_md.parent.name == name:
                 return skill_md.parent
         return None
@@ -3617,11 +3613,7 @@ class OptionalSkillSource(SkillSource):
             return []
 
         results: List[SkillMeta] = []
-        for skill_md in sorted(self._optional_dir.rglob("SKILL.md")):
-            if is_excluded_skill_path(
-                skill_md.relative_to(self._optional_dir), root=self._optional_dir
-            ):
-                continue
+        for skill_md in iter_skill_index_files(self._optional_dir, "SKILL.md"):
             parent = skill_md.parent
 
             try:
