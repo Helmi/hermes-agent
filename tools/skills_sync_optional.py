@@ -90,7 +90,9 @@ def _read_hub_install_paths() -> Set[str]:
 
 def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterator[Tuple[Path, Path, str]]:
     """Yield ``(skill_md, src, install_path)`` for every safe official optional skill."""
-    for skill_md in sorted(optional_dir.rglob("SKILL.md")):
+    from agent.skill_utils import iter_skill_index_files
+
+    for skill_md in iter_skill_index_files(optional_dir, "SKILL.md"):
         if (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir)
                 if root_relative else is_excluded_skill_path(skill_md)):
             continue
