@@ -4862,7 +4862,9 @@ def redact_key(key: str) -> str:
     """Redact an API key for display.
 
     Thin wrapper over :func:`agent.redact.mask_secret` — preserves the
-    "(not set)" placeholder in dim color for the empty case.
+    "(not set)" placeholder in dim color for the empty case. Always masks
+    (prefix/suffix); used by the dashboard and ``hermes dump`` where a
+    masked preview is an intentional debuggability feature.
     """
     from agent.redact import mask_secret
     return mask_secret(key, empty=color("(not set)", Colors.DIM))
@@ -4920,6 +4922,48 @@ def redact_config_value(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, list):
         return [redact_config_value(v, _depth + 1) for v in value]
     return value
+def _secret_redaction_enabled() -> bool:
+    """Whether presence-only secret display is active for this profile.
+
+    Reads ``security.redact_secrets`` from the merged (profile-aware)
+    config. Defaults to True when unset or unreadable, matching the
+    secure default and the import-time snapshot in ``agent.redact``.
+    """
+    try:
+        cfg = load_config()
+        sec = cfg.get("security", {})
+    except Exception:
+        return True
+    if not isinstance(sec, dict):
+        return True
+    val = sec.get("redact_secrets", True)
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def secret_display_label(value: Optional[str], *, redact: Optional[bool] = None) -> str:
+    """Display label for a secret in CLI diagnostics.
+
+    With secret redaction enabled (the default), report presence only —
+    ``'(set)'`` for a configured value and the dim ``'(not set)'``
+    placeholder otherwise. No credential characters or fragments are
+    emitted. With redaction explicitly disabled, fall back to
+    :func:`agent.redact.mask_secret` so masked prefix/suffix fragments
+    remain for debuggability (the pre-existing behavior).
+
+    ``redact``: callers that have already resolved the flag once per
+    ``show_config`` / ``show_status`` run may pass it to avoid re-reading
+    config for every key. When omitted, the flag is resolved on demand.
+    """
+    if not value:
+        return color("(not set)", Colors.DIM)
+    if redact is None:
+        redact = _secret_redaction_enabled()
+    if redact:
+        return "(set)"
+    from agent.redact import mask_secret
+    return mask_secret(value, empty=color("(not set)", Colors.DIM))
 
 
 def show_config():
@@ -4979,12 +5023,13 @@ def show_config():
         ("FAL_KEY", "FAL"),
     ]
     
+    _secret_redact = _secret_redaction_enabled()
     for env_key, name in keys:
         value = get_env_value(env_key)
-        print(f"  {name:<14} {redact_key(value)}")
+        print(f"  {name:<14} {secret_display_label(value, redact=_secret_redact)}")
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    print(f"  {'Anthropic':<14} {redact_key(anthropic_value)}")
+    print(f"  {'Anthropic':<14} {secret_display_label(anthropic_value, redact=_secret_redact)}")
     
     # Model settings
     print()
