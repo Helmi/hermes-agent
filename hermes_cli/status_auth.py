@@ -93,7 +93,7 @@ def _render_api_keys(ctx):
     # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
         value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
-        _status._row(name, bool(value), config.redact_key(value))
+        _status._row(name, bool(value), config.secret_display_label(value))
 
 
 def _render_auth_providers(ctx):
