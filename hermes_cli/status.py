@@ -15,7 +15,14 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from hermes_cli.auth import AuthError, resolve_provider
 from hermes_cli.colors import Colors, color
-from hermes_cli.config import get_env_path, get_env_value, get_hermes_home, load_config
+from hermes_cli.config import (
+    get_env_path,
+    get_env_value,
+    get_hermes_home,
+    load_config,
+    secret_display_label,
+    _secret_redaction_enabled,
+)
 from hermes_cli.models import provider_label
 from hermes_cli.nous_account import (
     format_nous_portal_entitlement_message,
@@ -173,6 +180,7 @@ def show_status(args):
             return ""
         return get_env_value(env_ref) or ""
 
+    _secret_redact = _secret_redaction_enabled()
     for name, env_ref in keys.items():
         # Anthropic already has a dedicated lookup below; keep that as the
         # single source of truth (it also resolves OAuth tokens), skip here
@@ -181,12 +189,12 @@ def show_status(args):
             continue
         value = _resolve_env(env_ref)
         has_key = bool(value)
-        display = redact_key(value)
+        display = secret_display_label(value, redact=_secret_redact)
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
 
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value)
+    anthropic_display = secret_display_label(anthropic_value, redact=_secret_redact)
     print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
 
     # =========================================================================
