@@ -1513,6 +1513,7 @@ DEFAULT_CONFIG = {
         "ignore_other_user_mentions": False,
         "thread_require_mention": False,  # require @mention in thread replies too
         "channel_prompts": {},  # per-channel ephemeral system prompts
+        "channel_cwds": {},            # Per-channel working directories
     },
 
     "discord": {
@@ -1552,6 +1553,7 @@ DEFAULT_CONFIG = {
         "websocket_event_max_silence_seconds": 14400,
         # per-channel ephemeral system prompts (forum parents apply to child threads)
         "channel_prompts": {},
+        "channel_cwds": {},            # Per-channel working directories
         # Opt-in DM role auth: DISCORD_ALLOWED_ROLES normally authorizes guild messages only (DMs
         # need DISCORD_ALLOWED_USERS). A guild ID here also authorizes DMs from that guild's members
         # holding the allowed role. Unset / "" / 0 = off.
@@ -1604,6 +1606,7 @@ DEFAULT_CONFIG = {
         "reactions": False,  # add 👀/✅/❌ reactions to messages during processing
         # per-chat/topic ephemeral system prompts (topics inherit from parent group)
         "channel_prompts": {},
+        "channel_cwds": {},            # Per-channel working directories
         "allowed_chats": "",  # if set, ONLY respond in these group/supergroup chat IDs
         "extra": {
             # Bot API 10.1 native rich messages (tables/task lists/math). Off = legacy MarkdownV2,
@@ -1623,6 +1626,7 @@ DEFAULT_CONFIG = {
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
         "allowed_channels": "",  # if set, ONLY respond in these channel IDs (whitelist)
         "channel_prompts": {},  # per-channel ephemeral system prompts
+        "channel_cwds": {},            # Per-channel working directories
     },
 
     "matrix": {
