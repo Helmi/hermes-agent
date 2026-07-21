@@ -655,6 +655,14 @@ class GatewayTurnPrepareMixin:
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
+        # Keep prompt/context-file discovery scoped to the configured channel folder.
+        _event_channel_cwd = getattr(event, "channel_cwd", None)
+        if _event_channel_cwd:
+            try:
+                from agent.runtime_cwd import set_session_cwd
+                set_session_cwd(_event_channel_cwd)
+            except Exception:
+                logger.debug("Failed to pin channel cwd contextvar", exc_info=True)
         # Self-injected turns (internal=True) persist with a DB-only display_kind: timeline notices, not user bubbles.
         from gateway.response_filters import display_kind_for_event
         persist_user_display_kind = display_kind_for_event(event)

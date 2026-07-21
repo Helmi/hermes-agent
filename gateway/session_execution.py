@@ -174,6 +174,7 @@ class GatewaySessionAgentMixin:
             user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
+            session_cwd=getattr(ctx, "channel_cwd", None),
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
@@ -193,6 +194,12 @@ class GatewaySessionAgentMixin:
         hits) or build a fresh one. Returns (agent, reused_cached_agent)."""
         ctx = self._ctx
         runner = self._runner
+        if getattr(ctx, "channel_cwd", None) and ctx.session_id:
+            try:
+                from tools.terminal_tool import register_task_env_overrides
+                register_task_env_overrides(ctx.session_id, {"cwd": ctx.channel_cwd})
+            except Exception:
+                logger.debug("Failed to register channel cwd override", exc_info=True)
         skip_context_files = self._skip_context_files(platform_key)
         sig = runner._agent_config_signature(
             turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
