@@ -405,7 +405,10 @@ def test_iter_skill_index_files_follows_directory_symlinks(tmp_path):
     real = skills_dir / "real-skill"
     real.mkdir()
     (real / "SKILL.md").write_text("---\nname: real-skill\n---\n", encoding="utf-8")
-    (skills_dir / "linked-skill").symlink_to(vault)
+    try:
+        (skills_dir / "linked-skill").symlink_to(vault)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
 
     found = list(iter_skill_index_files(skills_dir, "SKILL.md"))
 
