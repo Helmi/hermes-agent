@@ -1198,7 +1198,10 @@ class TestCountSkills:
         vault = tmp_path / "vault" / "linked-skill"
         vault.mkdir(parents=True)
         (vault / "SKILL.md").write_text("---\nname: linked-skill\n---\n", encoding="utf-8")
-        (skills_dir / "linked-skill").symlink_to(vault)
+        try:
+            (skills_dir / "linked-skill").symlink_to(vault)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
 
         assert _count_skills(profile_dir) == 2
 
