@@ -4233,6 +4233,20 @@ class TurnRunner:
 
         turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
 
+        # Per-channel working directory: start this session's terminal
+        # sandbox in the configured folder.  The _SESSION_CWD contextvar
+        # (set in _set_session_env) already covers context files and the
+        # system prompt; this covers the shell.  Registering again on a
+        # later turn is a no-op unless the config changed, in which case
+        # the live env is updated in place (same as the ACP/dashboard
+        # surfaces — see register_task_env_overrides).
+        if ctx.channel_cwd and ctx.session_id:
+            try:
+                from tools.terminal_tool import register_task_env_overrides
+                register_task_env_overrides(ctx.session_id, {"cwd": ctx.channel_cwd})
+            except Exception:
+                logger.debug("Failed to register channel cwd override", exc_info=True)
+
         # Check agent cache — reuse the AIAgent from the previous message
         # in this session to preserve the frozen system prompt and tool
         # schemas for prompt cache hits.
@@ -4479,7 +4493,8 @@ class TurnRunner:
                 session_db=getattr(self._runner._session_db, "_db", self._runner._session_db),
                 # Reload from disk — do not reuse the startup snapshot (#60955).
                 fallback_model=self._runner._refresh_fallback_model(),
-            )
+                session_cwd=ctx.channel_cwd,
+                )
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -15636,7 +15651,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # Set session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
-        
+
+        # Pin the per-channel working directory (channel_cwds) for this
+        # message's context so context files (AGENTS.md / HERMES.md) and the
+        # system prompt resolve against the channel's project folder.
+        # set_session_vars above already initialised the cwd contextvar to "";
+        # this override is cleared with the rest in _clear_session_env.
+        _event_channel_cwd = getattr(event, "channel_cwd", None)
+        if _event_channel_cwd:
+            try:
+                from agent.runtime_cwd import set_session_cwd
+                set_session_cwd(_event_channel_cwd)
+            except Exception:
+                logger.debug("Failed to pin channel cwd contextvar", exc_info=True)
+
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
         persist_user_message = None
@@ -16660,6 +16688,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                channel_cwd=getattr(event, "channel_cwd", None),
                 moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
@@ -22969,6 +22998,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        channel_cwd: Optional[str] = None,
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
@@ -22988,7 +23018,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
                 _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                channel_prompt=channel_prompt, moa_config=moa_config,
+                channel_prompt=channel_prompt, channel_cwd=channel_cwd,
+                moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
                 message_type=message_type,
@@ -23000,7 +23031,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
                 _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                channel_prompt=channel_prompt, moa_config=moa_config,
+                channel_prompt=channel_prompt, channel_cwd=channel_cwd,
+                moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
                 message_type=message_type,
@@ -23122,6 +23154,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        channel_cwd: Optional[str] = None,
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
@@ -23402,6 +23435,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             history=history,
             context_prompt=context_prompt,
             channel_prompt=channel_prompt,
+            channel_cwd=channel_cwd,
             session_id=session_id,
             session_key=session_key,
             run_generation=run_generation,
