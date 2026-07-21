@@ -261,6 +261,7 @@ class AIAgent(
         platform: str = None, user_id: str = None, user_id_alt: str = None, user_name: str = None,
         chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
         gateway_session_key: str = None,
+        session_cwd: str = None,
         skip_context_files: bool = False, load_soul_identity: bool = False,
         skip_memory: bool = False, skip_background_review: bool = False,
         session_db=None, parent_session_id: str = None,
@@ -342,7 +343,10 @@ class AIAgent(
                 thread_id=getattr(self, "_thread_id", None),
                 display_name=getattr(self, "_chat_name", None) or getattr(self, "_user_name", None),
                 origin_json=_gateway_origin_json(self), parent_session_id=self._parent_session_id,
-                cwd=_launch_cwd_for_session(source), profile_name=profile_for_session,
+                # An explicit session cwd (e.g. a per-channel channel_cwds entry resolved
+                # by the gateway) wins over the launch-dir heuristic, which records
+                # nothing for gateway sessions.
+                cwd=getattr(self, "_session_cwd", None) or _launch_cwd_for_session(source), profile_name=profile_for_session,
             )
             self._session_db_created = True
         except Exception as e:
