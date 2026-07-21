@@ -364,3 +364,42 @@ def test_adopt_rejects_empty_name(skills_home):
 
     assert adopt_skill("")[0] is False
 
+    rows = {r["name"]: r for r in usage_report()}
+    assert set(rows) == {"bundled-one", "hub-one", "mine"}
+    assert rows["bundled-one"]["provenance"] == "bundled"
+    assert rows["hub-one"]["provenance"] == "hub"
+    assert rows["mine"]["provenance"] == "agent"
+    # All carry real usage now.
+    for n in rows:
+        assert rows[n]["use_count"] == 1
+        assert rows[n]["_persisted"] is True
+
+
+def test_find_external_skill_dir_follows_directory_symlinks(skills_home, monkeypatch, tmp_path):
+    """External skill lookup must descend symlinked skill dirs.
+
+    ``_find_external_skill_dir`` resolves a skill by frontmatter name across
+    the configured external dirs; without a symlink-aware walk a vault-linked
+    skill is reported missing even though the loader can see it.
+    """
+    from tools.skill_usage import _find_external_skill_dir
+
+    vault = tmp_path / "vault" / "external-skill"
+    vault.mkdir(parents=True)
+    (vault / "SKILL.md").write_text("---\nname: external-skill\n---\n", encoding="utf-8")
+
+    external = tmp_path / "external"
+    external.mkdir()
+    try:
+        (external / "external-skill").symlink_to(vault)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    monkeypatch.setattr(
+        "agent.skill_utils.get_all_skills_dirs",
+        lambda: [skills_home / "skills", external],
+    )
+
+    found = _find_external_skill_dir("external-skill")
+    assert found is not None
+    assert found.name == "external-skill"
