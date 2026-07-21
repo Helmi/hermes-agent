@@ -118,6 +118,20 @@ HARDLINE_PATTERNS = [
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
     (_CMDPOS + r'systemctl\s+(poweroff|reboot|halt|kexec)\b', "systemctl poweroff/reboot"),
     (_CMDPOS + r'telinit\s+[06]\b', "telinit 0/6 (shutdown/reboot)"),
+    # 1Password direct secret retrieval — unconditional block.
+    # `op read` and `op item get` resolve secret material into the agent's
+    # stdout / tool output, where it enters conversation context, logs, and
+    # session transcripts.  The only permitted secret-consumption shape in
+    # agent/worker contexts is `op run` with `op://` environment references,
+    # which injects resolved values into the child process environment
+    # without ever printing them.  This guard is hardline (cannot be
+    # bypassed with --yolo, /yolo, approvals.mode=off, or cron approve
+    # mode) because a leaked secret has no recovery path short of rotation.
+    # Deliberately positionless (not _CMDPOS): command substitutions like
+    # ``echo $(op read op://v/i/f)`` must trip, and over-blocking quoted
+    # prose that names the subcommand is the safe direction.
+    (r'\bop\s+read\b', "1Password direct secret retrieval (op read)"),
+    (r'\bop\s+item\s+get\b', "1Password direct secret retrieval (op item get)"),
 ]
 
 # Pre-compiled at module load so the hot-path matcher never pays the cold re.compile fan-out
