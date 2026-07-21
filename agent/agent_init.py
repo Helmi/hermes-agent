@@ -2357,7 +2357,7 @@ def init_agent(
     request_overrides: dict[str, Any] | None = None, prefill_messages: list[dict[str, Any]] | None = None,
     platform: str | None = None, user_id: str | None = None, user_id_alt: str | None = None, user_name: str | None = None,
     chat_id: str | None = None, chat_name: str | None = None, chat_type: str | None = None, thread_id: str | None = None,
-    gateway_session_key: str | None = None, skip_context_files: bool = False,
+    gateway_session_key: str | None = None, session_cwd: str | None = None, skip_context_files: bool = False,
     load_soul_identity: bool = False, skip_memory: bool = False,
     skip_background_review: bool = False, session_db=None, parent_session_id: str | None = None,
     iteration_budget: IterationBudget = None, run_budget_seconds: Optional[float] = None,
@@ -2376,6 +2376,9 @@ def init_agent(
     for _name in _GATEWAY_IDENTITY_PARAMS:
         setattr(agent, f"_{_name}", _params[_name])
     agent.session_cwd = cwd or None
+    # Explicit logical working directory for the session row (e.g. a
+    # per-channel channel_cwds entry).  None = use the launch-dir heuristic.
+    agent._session_cwd = (session_cwd or "").strip() or None
     # Shared iteration budget: parent creates, children inherit.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
     # CLI replaces this with _cprint so raw ANSI status lines go through prompt_toolkit's
