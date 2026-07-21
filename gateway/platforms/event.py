@@ -72,6 +72,11 @@ class MessageEvent:
     auto_skill: Optional[str | list[str]] = None
     # Per-channel ephemeral system prompt; applied at API call time, never persisted to transcript.
     channel_prompt: Optional[str] = None
+    # Per-channel working directory (e.g. Discord channel_cwds).  Pins the
+    # session's logical cwd so context files (AGENTS.md / HERMES.md /
+    # .cursorrules) and the terminal sandbox resolve against the channel's
+    # project folder instead of the gateway launch directory.
+    channel_cwd: Optional[str] = None
     # History-backfilled channel context (missed under require_mention); kept out of ``text`` so
     # run.py's sender-prefix logic sees only the trigger message.
     channel_context: Optional[str] = None

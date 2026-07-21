@@ -1084,6 +1084,7 @@ class TurnRunner:
             user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
+            session_cwd=getattr(ctx, "channel_cwd", None),
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
@@ -1098,6 +1099,17 @@ class TurnRunner:
         hits) or build a fresh one. Returns (agent, reused_cached_agent)."""
         ctx = self._ctx
         runner = self._runner
+        # Per-channel working directory (channel_cwds): start this session's terminal
+        # sandbox in the configured folder. The _SESSION_CWD contextvar (pinned in
+        # run_turn) already covers context files and the system prompt; this covers
+        # the shell. Registering again on a later turn is a no-op unless the config
+        # changed, in which case the live env is updated in place.
+        if getattr(ctx, "channel_cwd", None) and ctx.session_id:
+            try:
+                from tools.terminal_tool import register_task_env_overrides
+                register_task_env_overrides(ctx.session_id, {"cwd": ctx.channel_cwd})
+            except Exception:
+                logger.debug("Failed to register channel cwd override", exc_info=True)
         skip_context_files = self._skip_context_files(platform_key)
         sig = runner._agent_config_signature(
             turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,

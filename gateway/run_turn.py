@@ -1887,6 +1887,18 @@ class GatewayTurnMixin:
         context = build_session_context(source, self.config, session_entry)
         # Session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
+        # Pin the per-channel working directory (channel_cwds) for this
+        # message's context so context files (AGENTS.md / HERMES.md) and the
+        # system prompt resolve against the channel's project folder.
+        # _set_session_env above already initialised the cwd contextvar to "";
+        # this override is cleared with the rest in _clear_session_env.
+        _event_channel_cwd = getattr(event, "channel_cwd", None)
+        if _event_channel_cwd:
+            try:
+                from agent.runtime_cwd import set_session_cwd
+                set_session_cwd(_event_channel_cwd)
+            except Exception:
+                logger.debug("Failed to pin channel cwd contextvar", exc_info=True)
         # Self-injected turns (MessageEvent(internal=True)) persist with a DB-only display_kind so
         # UIs render timeline notices, not user bubbles; role/content untouched.
         persist_user_display_kind = "internal_notification" if getattr(event, "internal", False) else None
@@ -2020,6 +2032,7 @@ class GatewayTurnMixin:
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
+                channel_cwd=getattr(event, "channel_cwd", None),
                 persist_user_message=prepared.persist_user_message,
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
@@ -3590,6 +3603,7 @@ class GatewayTurnMixin:
             next_message_id = self._reply_anchor_for_event(pending_event)
             next_inbound_id = str(pending_event.message_id) if getattr(pending_event, "message_id", None) else None
             next_channel_prompt = getattr(pending_event, "channel_prompt", None)
+            next_channel_cwd = getattr(pending_event, "channel_cwd", None)
             next_message_type = getattr(pending_event, "message_type", None)
 
         # Clear the prior turn's streaming-TTS completion marker so the recursive turn isn't suppressed.
@@ -3635,7 +3649,8 @@ class GatewayTurnMixin:
                 source=next_source, session_id=session_id, session_key=next_session_key,
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
-                channel_prompt=next_channel_prompt, message_type=next_message_type,
+                channel_prompt=next_channel_prompt, channel_cwd=next_channel_cwd,
+                message_type=next_message_type,
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -3946,6 +3961,7 @@ class GatewayTurnMixin:
         run_generation: Optional[int] = None, _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None, inbound_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
+        channel_cwd: Optional[str] = None,
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
@@ -3968,7 +3984,7 @@ class GatewayTurnMixin:
             run_generation=run_generation, context_prompt=context_prompt, history=history,
             session_id=session_id, _interrupt_depth=_interrupt_depth,
             event_message_id=event_message_id, inbound_message_id=inbound_message_id,
-            channel_prompt=channel_prompt, moa_config=moa_config,
+            channel_prompt=channel_prompt, moa_config=moa_config, channel_cwd=channel_cwd,
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,

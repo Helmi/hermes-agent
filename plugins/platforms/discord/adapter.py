@@ -4484,6 +4484,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         return MessageEvent(
             text=text, message_type=msg_type, source=source, raw_message=interaction,
             channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
+            channel_cwd=self._resolve_channel_cwd(channel_id, parent_id or None),
         )
 
     # --- Thread creation helpers ---
@@ -4541,9 +4542,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         )
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None)
+        _channel_cwd = self._resolve_channel_cwd(thread_id, _parent_id or None)
         event = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=source, raw_message=interaction,
-            auto_skill=_skills, channel_prompt=_channel_prompt,
+            auto_skill=_skills, channel_prompt=_channel_prompt, channel_cwd=_channel_cwd,
         )
         await self.handle_message(event)
 
@@ -4575,6 +4577,11 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return configured
         text = str(configured).strip().lower()
         return text in {"true", "1", "yes", "on"} if truthy else text not in {"false", "0", "no", "off"}
+
+    def _resolve_channel_cwd(self, channel_id: str, parent_id: str | None = None) -> str | None:
+        """Resolve a Discord per-channel working directory, preferring the exact channel over its parent."""
+        from gateway.platforms.base import resolve_channel_cwd
+        return resolve_channel_cwd(self.config.extra, channel_id, parent_id)
 
     def _discord_require_mention(self) -> bool:
         """Return whether Discord channel messages require a bot mention."""
@@ -5848,6 +5855,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+        _channel_cwd = self._resolve_channel_cwd(_chan_id, _parent_id or None)
         reply_to_id = None
         reply_to_text = None
         if message.reference:
@@ -5858,7 +5866,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             text=event_text, message_type=msg_type, source=source, raw_message=message,
             message_id=str(message.id), media_urls=media_urls, media_types=media_types,
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text,
-            timestamp=message.created_at, auto_skill=_skills, channel_prompt=_channel_prompt,
+            timestamp=message.created_at, auto_skill=_skills, channel_prompt=_channel_prompt, channel_cwd=_channel_cwd,
             channel_context=_channel_context,
         )
         # Track participation so follow-ups in this thread don't need @mention.

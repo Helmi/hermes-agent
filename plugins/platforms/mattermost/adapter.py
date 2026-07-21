@@ -582,11 +582,12 @@ class MattermostAdapter(BasePlatformAdapter):
             chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
             user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
             thread_id=thread_id, message_id=post_id)
-        from gateway.platforms.base import resolve_channel_prompt
+        from gateway.platforms.base import resolve_channel_cwd, resolve_channel_prompt
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
             media_urls=media_urls or None, media_types=media_types or None,
-            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
+            channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None),
+            channel_cwd=resolve_channel_cwd(self.config.extra, channel_id, None)))
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---

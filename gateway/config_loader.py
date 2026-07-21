@@ -202,6 +202,9 @@ _SHARED_KEYS: tuple = (
     ),
     ("channel_skill_bindings", _DISCORD_SLACK, None),
     ("channel_prompts", None, _str_keyed),
+    # Per-channel working directories (fork feature channel_cwds): string-keyed
+    # channel/thread id -> absolute path, bridged into extra like channel_prompts.
+    ("channel_cwds", None, _str_keyed),
     *_plain("gateway_restart_notification", "typing_indicator", "typing_status_text"),
 )
 

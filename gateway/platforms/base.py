@@ -1718,6 +1718,45 @@ def resolve_channel_prompt(config_extra: dict, channel_id: str, parent_id: str |
     return None
 
 
+def resolve_channel_cwd(
+    config_extra: dict,
+    channel_id: str,
+    parent_id: str | None = None,
+) -> str | None:
+    """Resolve a per-channel working directory from platform config.
+
+    Looks up ``channel_cwds`` in the adapter's ``config.extra`` dict.
+    Prefers an exact match on *channel_id*; falls back to *parent_id*
+    (useful for forum threads / child channels inheriting a parent cwd).
+
+    Returns the expanded absolute path, or None if no match is found.
+    A configured path that is not an existing directory is ignored with a
+    warning so a typo in config.yaml is visible instead of silently skipped.
+    """
+    cwds = config_extra.get("channel_cwds") or {}
+    if not isinstance(cwds, dict):
+        return None
+
+    for key in (channel_id, parent_id):
+        if not key:
+            continue
+        raw = cwds.get(key)
+        if raw is None:
+            continue
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(resolved):
+            logger.warning(
+                "channel_cwds: working directory configured for channel %s "
+                "does not exist, ignoring: %s", key, raw,
+            )
+            continue
+        return resolved
+    return None
+
+
 def resolve_channel_skills(
     config_extra: dict, channel_id: str, parent_id: str | None = None) -> list[str] | None:
     """Auto-loaded skill(s) for a channel/thread from ``channel_skill_bindings`` (entries

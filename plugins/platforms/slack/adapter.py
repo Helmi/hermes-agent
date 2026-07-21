@@ -4200,8 +4200,9 @@ class SlackAdapter(BasePlatformAdapter):
     def _channel_prompt_with_identity(self, channel_id: str, team_id: str) -> Optional[str]:
         """Channel prompt with the bot's Slack identity prepended (ephemeral, never persisted,
         so prompt caching holds) so it won't read a human's mention as a self-mention."""
-        from gateway.platforms.base import resolve_channel_prompt
+        from gateway.platforms.base import resolve_channel_cwd, resolve_channel_prompt
         channel_prompt = resolve_channel_prompt(self.config.extra, channel_id, None)
+        channel_cwd = resolve_channel_cwd(self.config.extra, channel_id, None)
         identity_prompt = self._build_identity_prompt(team_id)
         if identity_prompt:
             channel_prompt = (
@@ -4486,7 +4487,9 @@ class SlackAdapter(BasePlatformAdapter):
             # Workflow/app posts have user=None; flag them so the SLACK_ALLOW_BOTS bypass can
             # authorize them. Same predicate as the drop gate (api_human_users stay human).
             is_bot=self._event_declares_bot_sender(event))
-        from gateway.platforms.base import resolve_channel_skills
+        from gateway.platforms.base import resolve_channel_cwd, resolve_channel_skills
+        # Per-channel working directory (channel_cwds), resolved alongside skills/prompts.
+        _channel_cwd = resolve_channel_cwd(self.config.extra, channel_id, None)
         # Remaining ``<@UID>`` are OTHER participants (own mention stripped
         # above); render as ``@DisplayName`` so the agent knows who is addressed.
         text = await self._humanize_user_mentions(text, chat_id=channel_id, team_id=team_id)
@@ -4501,6 +4504,7 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=self._channel_prompt_with_identity(channel_id, team_id),
             channel_context=channel_context,
+            channel_cwd=_channel_cwd,
             # thread_ts is the thread root, not an explicit reply (root is in channel_context).
             reply_to_text=None,
             auto_skill=resolve_channel_skills(self.config.extra, channel_id, None),
