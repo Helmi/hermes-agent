@@ -8,6 +8,8 @@ change-detector.
 
 from __future__ import annotations
 
+import pytest
+
 from agent import learning_graph
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
@@ -100,3 +102,27 @@ def test_foreground_created_skill_is_in_journey_before_first_use(tmp_path):
 
     assert "fresh-learn-skill" in skill_nodes
     assert "hand-written" not in skill_nodes
+
+
+def test_iter_skill_files_follows_directory_symlinks(tmp_path):
+    """Skill dirs symlinked in from an external vault must reach the graph.
+
+    ``build_skill_nodes`` is the graph's own discovery path; a plain rglob
+    walk stops at directory symlinks and silently drops those skills.
+    """
+    vault = tmp_path / "vault" / "linked-skill"
+    vault.mkdir(parents=True)
+    (vault / "SKILL.md").write_text("---\nname: linked-skill\n---\n", encoding="utf-8")
+
+    root = tmp_path / "skills"
+    real = root / "real-skill"
+    real.mkdir(parents=True)
+    (real / "SKILL.md").write_text("---\nname: real-skill\n---\n", encoding="utf-8")
+    try:
+        (root / "linked-skill").symlink_to(vault)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    found = set(learning_graph.build_skill_nodes([("local", root)]))
+
+    assert found == {"real-skill", "linked-skill"}
