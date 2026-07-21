@@ -569,9 +569,38 @@ def test_adopt_refuses_skills_the_user_does_not_own(skills_home, monkeypatch, ki
 
 
 def test_adopt_rejects_empty_name(skills_home):
-    from tools.skill_usage import adopt_skill
+    from tools.skill_usage import adopt_skill, usage_report, bump_use
 
     assert adopt_skill("")[0] is False
+
+    # Stand up three skills with distinct provenance so usage_report has
+    # something to enumerate. Without this the test depended on state leaked
+    # from test_bundled_and_hub_skills_are_protected, which breaks under
+    # per-test fixture isolation.
+    skills_dir = skills_home / "skills"
+    _write_skill(skills_dir, "bundled-one")
+    _write_skill(skills_dir, "hub-one")
+    _write_skill(skills_dir, "mine")
+
+    (skills_dir / ".bundled_manifest").write_text(
+        "bundled-one:abc\n", encoding="utf-8",
+    )
+    hub = skills_dir / ".hub"
+    hub.mkdir()
+    (hub / "lock.json").write_text(
+        json.dumps({"installed": {"hub-one": {}}}), encoding="utf-8",
+    )
+
+    for name in ("bundled-one", "hub-one", "mine"):
+        bump_use(name)
+
+    rows = {r["name"]: r for r in usage_report()}
+    assert set(rows) == {"bundled-one", "hub-one", "mine"}
+    assert rows["bundled-one"]["provenance"] == "bundled"
+    assert rows["hub-one"]["provenance"] == "hub"
+    assert rows["mine"]["provenance"] == "agent"
+    for n in rows:
+        assert rows[n]["use_count"] == 1
 
 
 def test_foreground_create_stamps_learn_provenance_not_agent(skills_home):
@@ -613,3 +642,33 @@ def test_skill_file_lock_is_reentrant_in_thread_and_exclusive_across_threads(tmp
         assert not other_done.wait(timeout=0.2), "second thread acquired a held lock"
     t.join(timeout=2)
     assert entered.is_set() and other_done.is_set()
+
+
+def test_find_external_skill_dir_follows_directory_symlinks(skills_home, monkeypatch, tmp_path):
+    """External skill lookup must descend symlinked skill dirs.
+
+    ``_find_external_skill_dir`` resolves a skill by frontmatter name across
+    the configured external dirs; without a symlink-aware walk a vault-linked
+    skill is reported missing even though the loader can see it.
+    """
+    from tools.skill_usage import _find_external_skill_dir
+
+    vault = tmp_path / "vault" / "external-skill"
+    vault.mkdir(parents=True)
+    (vault / "SKILL.md").write_text("---\nname: external-skill\n---\n", encoding="utf-8")
+
+    external = tmp_path / "external"
+    external.mkdir()
+    try:
+        (external / "external-skill").symlink_to(vault)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    monkeypatch.setattr(
+        "agent.skill_utils.get_all_skills_dirs",
+        lambda: [skills_home / "skills", external],
+    )
+
+    found = _find_external_skill_dir("external-skill")
+    assert found is not None
+    assert found.name == "external-skill"
