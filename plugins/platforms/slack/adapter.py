@@ -6737,6 +6737,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Per-channel ephemeral prompt
         from gateway.platforms.base import (
+            resolve_channel_cwd,
             resolve_channel_prompt,
             resolve_channel_skills,
         )
@@ -6757,6 +6758,11 @@ class SlackAdapter(BasePlatformAdapter):
                 if _channel_prompt
                 else _identity_prompt
             )
+        _channel_cwd = resolve_channel_cwd(
+            self.config.extra,
+            channel_id,
+            None,
+        )
         _auto_skill = resolve_channel_skills(
             self.config.extra,
             channel_id,
@@ -6808,6 +6814,7 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=_channel_prompt,
             channel_context=channel_context,
+            channel_cwd=_channel_cwd,
             reply_to_text=reply_to_text,
             auto_skill=_auto_skill,
             metadata={
