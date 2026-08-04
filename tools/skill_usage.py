@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
-from agent.skill_utils import is_external_skill_path, iter_skill_index_files
+from agent.skill_utils import is_excluded_skill_path, is_external_skill_path, iter_skill_index_files
 
 logger = logging.getLogger(__name__)
 
