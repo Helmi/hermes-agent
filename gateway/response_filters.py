@@ -43,7 +43,9 @@ def _canonical_silence_candidate(text: str) -> str:
 
 def _is_edge_punctuation(ch: str) -> bool:
     # Square brackets stay structural so malformed ``[SILENT`` cannot become ``SILENT``.
-    return ch not in "[]" and unicodedata.category(ch).startswith("P")
+    # Backtick is Unicode category Sk, not P, so it needs an explicit clause —
+    # without it a backtick-wrapped silence marker defeats the matcher (#54192).
+    return ch not in "[]" and (unicodedata.category(ch).startswith("P") or ch == "`")
 
 
 def _strip_edge_silence_punctuation(text: str) -> str:
@@ -90,8 +92,10 @@ def is_autonomous_silence_response(response: Any) -> bool:
     lines = [ln for ln in stripped.splitlines() if ln.strip()]
     # Bracketed form only for the prefix rule, so a bare "Silent retry succeeded" is NOT swallowed.
     # Same de-punctuating forms as the interactive rule, so ``【静默】`` / ``静默。`` cannot
-    # be suppressed in chat yet delivered by cron.
-    return stripped.upper().startswith(_BRACKETED_SILENCE_MARKERS) or any(
+    # be suppressed in chat yet delivered by cron. Markdown wrappers around the sentinel
+    # are stripped via the edge-punct stripper (backtick = Sk, not P — #54192).
+    sentinel_prefix = _strip_edge_silence_punctuation(stripped).upper()
+    return sentinel_prefix.startswith(_BRACKETED_SILENCE_MARKERS) or any(
         is_intentional_silence_response(c) for c in (stripped, lines[0], lines[-1])
     )
 
