@@ -24,7 +24,9 @@ def _canonical_silence_candidate(text: str) -> str:
 
 def _is_edge_punctuation(ch: str) -> bool:
     # Square brackets stay structural so malformed ``[SILENT`` cannot become ``SILENT``.
-    return ch not in "[]" and unicodedata.category(ch).startswith("P")
+    # Backtick is Unicode category Sk, not P, so it needs an explicit clause —
+    # without it a backtick-wrapped silence marker defeats the matcher (#54192).
+    return ch not in "[]" and (unicodedata.category(ch).startswith("P") or ch == "`")
 
 
 def _strip_edge_silence_punctuation(text: str) -> str:
@@ -69,10 +71,17 @@ def is_autonomous_silence_response(response: Any) -> bool:
     if not stripped:
         return False
     lines = [ln for ln in stripped.splitlines() if ln.strip()]
-    # Bracketed form only for the prefix rule, so a bare "Silent retry succeeded" is NOT swallowed.
-    return stripped.upper().startswith("[SILENT]") or any(
-        _canonical_silence_candidate(c) in LIVE_GATEWAY_SILENT_MARKERS for c in (stripped, lines[0], lines[-1])
-    )
+
+    def _is_token(line: str) -> bool:
+        # Plural candidates: also try the depunctuated form so a wrapped
+        # marker (backtick- or asterisk-wrapped [SILENT]/NO_REPLY) still matches.
+        return any(c in LIVE_GATEWAY_SILENT_MARKERS for c in _canonical_silence_candidates(line))
+
+    # Bracketed form only for the prefix rule, so a bare "Silent retry
+    # succeeded" is NOT swallowed. Markdown wrappers around the sentinel
+    # are stripped via the edge-punct stripper (backtick = Sk, not P — #54192).
+    sentinel_prefix = _strip_edge_silence_punctuation(stripped).upper()
+    return sentinel_prefix.startswith("[SILENT]") or any(_is_token(c) for c in (stripped, lines[0], lines[-1]))
 
 
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:
