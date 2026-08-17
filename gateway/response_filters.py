@@ -37,9 +37,9 @@ def _strip_edge_silence_punctuation(text: str) -> str:
     """
     start = 0
     end = len(text)
-    while start < end and text[start] not in "[]" and unicodedata.category(text[start]).startswith("P"):
+    while start < end and text[start] not in "[]" and (unicodedata.category(text[start]).startswith("P") or text[start] == "`"):
         start += 1
-    while end > start and text[end - 1] not in "[]" and unicodedata.category(text[end - 1]).startswith("P"):
+    while end > start and text[end - 1] not in "[]" and (unicodedata.category(text[end - 1]).startswith("P") or text[end - 1] == "`"):
         end -= 1
     return text[start:end].strip()
 
@@ -93,7 +93,7 @@ def is_autonomous_silence_response(response: Any) -> bool:
         return False
 
     def _is_token(line: str) -> bool:
-        return _canonical_silence_candidate(line) in LIVE_GATEWAY_SILENT_MARKERS
+        return any(c in LIVE_GATEWAY_SILENT_MARKERS for c in _canonical_silence_candidates(line))
 
     # Whole response is exactly a token.
     if _is_token(stripped):
@@ -106,7 +106,13 @@ def is_autonomous_silence_response(response: Any) -> bool:
     # Bracketed sentinel used as a same-line prefix — the documented pattern
     # "[SILENT] No changes detected".  Restricted to the bracketed form so a
     # bare word like "Silent retry succeeded" is NOT swallowed.
-    if stripped.upper().startswith("[SILENT]"):
+    # Strip markdown wrappers (backticks, asterisks) models add around the
+    # bracketed form — backtick has Unicode category Sk, not P, so the edge
+    # punct stripper above can't catch it (#54192).
+    sentinel_prefix = stripped.upper()
+    while sentinel_prefix and sentinel_prefix[0] in "`*":
+        sentinel_prefix = sentinel_prefix[1:]
+    if sentinel_prefix.startswith("[SILENT]"):
         return True
     return False
 
