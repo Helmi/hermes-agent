@@ -743,6 +743,19 @@ class TestLoadGatewayConfig:
 
         assert config.stt_echo_transcripts is False
 
+    @staticmethod
+    def _clear_api_server_env(monkeypatch):
+        """Keep _apply_env_overrides from masking the YAML path under test."""
+        for key in (
+            "API_SERVER_ENABLED",
+            "API_SERVER_KEY",
+            "API_SERVER_PORT",
+            "API_SERVER_HOST",
+            "API_SERVER_CORS_ORIGINS",
+            "API_SERVER_MODEL_NAME",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
     def test_api_server_from_nested_gateway_section(self, tmp_path, monkeypatch):
         """``gateway.api_server:`` (nested YAML form) must be discovered and
         enable the platform.
