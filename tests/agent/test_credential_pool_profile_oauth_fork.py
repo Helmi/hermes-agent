@@ -459,7 +459,7 @@ def test_profile_auth_add_never_copies_roots_provider_login(fleet: dict, provide
 
 
 def test_auth_add_never_reports_added_for_a_row_the_store_did_not_keep(fleet, monkeypatch, capsys):
-    """"Added" is printed only for a credential the store holds afterwards."""
+    """``Added`` is printed only for a credential the store holds afterwards."""
     from argparse import Namespace
 
     import agent.credential_pool as credential_pool
