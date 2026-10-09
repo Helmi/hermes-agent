@@ -337,7 +337,10 @@ class TestBOMToleranceSiblingSites:
         assert fm.get("name") == "bp"
 
     def test_skills_hub_parsers_accept_bom(self):
-        from tools.skills_hub import GitHubSource, OptionalSkillSource
+        # Upstream split the skills hub into skills_hub_github / skills_hub_official;
+        # the BOM-tolerant parsers now live there.
+        from tools.skills_hub_github import GitHubSource
+        from tools.skills_hub_official import OptionalSkillSource
 
         for parser in (
             GitHubSource._parse_frontmatter_quick,
