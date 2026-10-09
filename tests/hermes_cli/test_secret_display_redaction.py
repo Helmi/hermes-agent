@@ -150,7 +150,7 @@ class TestShowStatusRedaction:
 
         from hermes_cli.status import show_status
 
-        show_status(SimpleNamespace(all=False, deep=False))
+        show_status(SimpleNamespace(full=True, deep=False))
         out = capsys.readouterr().out
 
         assert "(set)" in out
@@ -160,14 +160,15 @@ class TestShowStatusRedaction:
 
     def test_status_all_still_redacts(self, monkeypatch, capsys):
         # `hermes status --all` used to be a full-value escape hatch; upstream
-        # closed it in c080a530a ("redact status API keys with --all"). The
-        # presence-only label must hold on that path too.
+        # closed it in c080a530a ("redact status API keys with --all") and later
+        # folded --all into --full (dest="full"). The presence-only label must
+        # hold on that path too.
         _set_redact(True)
         monkeypatch.setenv("OPENROUTER_API_KEY", _DUMMY_OPENROUTER)
 
         from hermes_cli.status import show_status
 
-        show_status(SimpleNamespace(all=True, deep=False))
+        show_status(SimpleNamespace(full=True, deep=False))
         out = capsys.readouterr().out
 
         assert "(set)" in out
