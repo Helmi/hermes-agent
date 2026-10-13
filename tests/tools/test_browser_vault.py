@@ -177,12 +177,26 @@ class TestClassifier:
             _ctrl(autocomplete="new-password", type="password")
         ) is None
 
+    def test_new_password_requires_explicit_compatibility_opt_in(self):
+        res = classify_login_control(
+            _ctrl(autocomplete="new-password", type="password"),
+            allow_new_password=True,
+        )
+        assert res is not None and res.token == "current-password"
+
     def test_one_time_code_excluded(self):
         assert classify_login_control(_ctrl(autocomplete="one-time-code")) is None
+        assert classify_login_control(
+            _ctrl(autocomplete="one-time-code", type="password"),
+            allow_new_password=True,
+        ) is None
 
     def test_label_new_password_excluded(self):
-        for label in ("New password", "Confirm Password", "create-password", "Repeat  password"):
+        for label in ("New password", "Confirm Password", "Password confirmation", "Reset password", "create-password", "Repeat  password"):
             assert classify_login_control(_ctrl(type="password", label=label)) is None, label
+            assert classify_login_control(
+                _ctrl(type="password", label=label), allow_new_password=True
+            ) is None, label
 
     def test_password_type_maps_current_password(self):
         res = classify_login_control(_ctrl(type="password"))
@@ -248,6 +262,24 @@ class TestClassifier:
         assert "window.location.origin" in js
         assert "origin_changed" in js
         assert js.index("origin_changed") < js.index("querySelectorAll")
+
+    def test_build_fill_js_asserts_compatibility_path_before_any_write(self):
+        js = build_fill_js(
+            [{"index": 0, "token": "current-password", "value": "x"}],
+            expected_origin="https://www.tiktok.com",
+            expected_path="/login/phone-or-email/email",
+        )
+        assert "window.location.pathname" in js
+        assert "path_changed" in js
+        assert js.index("path_changed") < js.index("querySelectorAll")
+
+    def test_inspection_uses_only_an_exact_local_code_caption_as_label_fallback(self):
+        from agent.vault_login_classifier import build_inspection_js
+
+        js = build_inspection_js("nonce")
+        assert "localCodeCaption" in js
+        assert "/^code$/i.test(text)" in js
+        assert "explicitLabel || localCodeCaption" in js
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +459,49 @@ class TestBrowserVaultTools:
         assert '"index": 0' not in secret_exprs[0]
         assert "user@example.com" not in secret_exprs[0]
 
+    def test_tiktok_login_path_allows_only_its_mislabeled_password_field(self, store):
+        from tools import browser_vault_tool
+
+        meta = _add_login(store, origin="https://www.tiktok.com")
+        controls = [{"autocomplete": "new-password", "formIndex": 0, "index": 0,
+                     "label": "Password", "name": "password", "type": "password"}]
+        secret_exprs = []
+
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://www.tiktok.com"), \
+             patch.object(browser_vault_tool, "_current_page_url", return_value="https://www.tiktok.com/login/phone-or-email/email?lang=en"), \
+             patch.object(browser_vault_tool, "_eval_js", return_value={"success": True, "result": json.dumps(controls)}), \
+             patch.object(browser_vault_tool, "_eval_js_secret", side_effect=lambda _t, e: secret_exprs.append(e) or {"success": True, "result": json.dumps({"filled": 1})}):
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+        assert out["success"] is True
+        assert '"/login/phone-or-email/email"' in secret_exprs[0]
+        assert "window.location.pathname" in secret_exprs[0]
+
+    @pytest.mark.parametrize("url", [
+        "https://tiktok.com/login/phone-or-email/email",
+        "https://www.tiktok.com/login/phone-or-email/phone",
+        "https://www.tiktok.com/signup",
+        "http://www.tiktok.com/login/phone-or-email/email",
+        "https://www.tiktok.com:444/login/phone-or-email/email",
+        "https://user@www.tiktok.com/login/phone-or-email/email",
+        "https://www.tiktok.com/reset-password",
+    ])
+    def test_tiktok_exception_rejects_other_hosts_and_paths(self, store, url):
+        from tools import browser_vault_tool
+
+        meta = _add_login(store, origin="https://www.tiktok.com")
+        controls = [{"autocomplete": "new-password", "formIndex": 0, "index": 0,
+                     "label": "Password", "name": "password", "type": "password"}]
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://www.tiktok.com"), \
+             patch.object(browser_vault_tool, "_current_page_url", return_value=url), \
+             patch.object(browser_vault_tool, "_eval_js", return_value={"success": True, "result": json.dumps(controls)}), \
+             patch.object(browser_vault_tool, "_eval_js_secret") as secret_eval:
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+        assert out["success"] is False
+        assert "No login form fields" in out["error"]
+        secret_eval.assert_not_called()
+
     def test_fill_toctou_navigation_writes_nothing(self, store):
         """P1-2 schedule regression: inspection passes on the allowed origin,
         the page navigates before the fill script runs, the in-script origin
@@ -466,6 +541,25 @@ class TestBrowserVaultTools:
         assert out["error_type"] == "origin_changed"
         assert out.get("filled_fields", 0) == 0
         assert "s3cret-pw" not in raw
+
+    def test_tiktok_path_navigation_before_fill_writes_nothing(self, store):
+        from tools import browser_vault_tool
+
+        meta = _add_login(store, origin="https://www.tiktok.com")
+        controls = [{"autocomplete": "new-password", "formIndex": 0, "index": 0,
+                     "label": "Password", "name": "password", "type": "password"}]
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://www.tiktok.com"), \
+             patch.object(browser_vault_tool, "_current_page_url", return_value="https://www.tiktok.com/login/phone-or-email/email"), \
+             patch.object(browser_vault_tool, "_eval_js", return_value={"success": True, "result": json.dumps(controls)}), \
+             patch.object(browser_vault_tool, "_eval_js_secret", return_value={
+                 "success": True, "result": json.dumps({"refused": "path_changed", "found": "/signup"})
+             }) as secret_eval:
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+        assert out["success"] is False
+        assert out["error_type"] == "origin_changed"
+        assert secret_eval.call_count == 1
+        assert "s3cret-pw" not in json.dumps(out)
 
     def test_secret_eval_fails_closed_without_supervisor(self, store):
         """P1-1: the secret-bearing eval NEVER falls back to the argv path."""
@@ -826,3 +920,95 @@ class TestTwoFactor:
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval):
             out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
         assert out["error_type"] == "no_code_field"
+
+    def test_instagram_exact_route_accepts_one_generic_code_field_and_pins_path(self):
+        from agent.vault_backends import unlock as unlock_mod
+        from tools import browser_vault_tool
+
+        unlock_mod.set_code_prompt_callback(lambda site, hint: "246810")
+        controls = [{"index": 0, "type": "text", "name": "", "label": "Code", "autocomplete": "off"}]
+        seen = {}
+
+        def fake_eval(task_id, expression):
+            return {"success": True, "result": (
+                json.dumps(controls) if "querySelectorAll" in expression
+                else "https://www.instagram.com/accounts/login/two_step_verification?opaque-auth-context"
+            )}
+
+        def fake_secret(task_id, expression):
+            seen["expression"] = expression
+            return {"success": True, "result": json.dumps({"filled": 1})}
+
+        with patch("agent.vault_backends.unlock.can_prompt_here", return_value=True), \
+             patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
+             patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
+             patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_secret):
+            raw = browser_vault_tool.browser_vault_enter_code(task_id="t")
+        unlock_mod.set_code_prompt_callback(None)
+        out = json.loads(raw)
+        assert out["success"] is True and out["filled_fields"] == 1
+        assert '"/accounts/login/two_step_verification"' in seen["expression"]
+        assert "window.location.pathname" in seen["expression"]
+        assert "246810" not in raw and "opaque-auth-context" not in raw
+
+    @pytest.mark.parametrize("url", [
+        "https://instagram.com/accounts/login/two_step_verification",
+        "http://www.instagram.com/accounts/login/two_step_verification",
+        "https://www.instagram.com/accounts/login/two_step_verification/",
+        "https://www.instagram.com/accounts/login/two_step_verification/other",
+        "https://www.instagram.com/accounts/login",
+        "https://www.instagram.com:444/accounts/login/two_step_verification",
+    ])
+    def test_instagram_generic_code_exception_rejects_other_routes(self, url):
+        from tools import browser_vault_tool
+
+        controls = [{"index": 0, "type": "tel", "name": "", "label": "Code", "autocomplete": "off"}]
+        fake_eval = lambda t, e: {"success": True, "result": json.dumps(controls) if "querySelectorAll" in e else url}
+        with patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
+             patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
+             patch.object(browser_vault_tool, "_eval_js_secret") as secret_eval:
+            out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
+        assert out["error_type"] == "no_code_field"
+        secret_eval.assert_not_called()
+
+    @pytest.mark.parametrize("controls", [
+        [
+            {"index": 0, "type": "text", "name": "", "label": "Code", "autocomplete": "off"},
+            {"index": 1, "type": "tel", "name": "", "label": "", "autocomplete": "off"},
+        ],
+        [{"index": 0, "type": "text", "name": "", "label": "Code request", "autocomplete": "off"}],
+        [{"index": 0, "type": "password", "name": "", "label": "Code", "autocomplete": "off"}],
+    ])
+    def test_instagram_generic_code_requires_one_text_or_tel_with_exact_code_caption(self, controls):
+        from tools import browser_vault_tool
+
+        url = "https://www.instagram.com/accounts/login/two_step_verification"
+        fake_eval = lambda t, e: {"success": True, "result": json.dumps(controls) if "querySelectorAll" in e else url}
+        with patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
+             patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
+             patch.object(browser_vault_tool, "_eval_js_secret") as secret_eval:
+            out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
+        assert out["error_type"] == "no_code_field"
+        secret_eval.assert_not_called()
+
+    def test_instagram_route_change_refuses_before_code_write(self):
+        from agent.vault_backends import unlock as unlock_mod
+        from tools import browser_vault_tool
+
+        unlock_mod.set_code_prompt_callback(lambda site, hint: "246810")
+        controls = [{"index": 0, "type": "text", "name": "", "label": "Code", "autocomplete": "off"}]
+        url = "https://www.instagram.com/accounts/login/two_step_verification"
+        fake_eval = lambda t, e: {"success": True, "result": json.dumps(controls) if "querySelectorAll" in e else url}
+        with patch("agent.vault_backends.unlock.can_prompt_here", return_value=True), \
+             patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
+             patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
+             patch.object(browser_vault_tool, "_eval_js_secret", return_value={
+                 "success": True, "result": json.dumps({"refused": "path_changed", "found": "/accounts/login"})
+             }) as secret_eval:
+            raw = browser_vault_tool.browser_vault_enter_code(task_id="t")
+        unlock_mod.set_code_prompt_callback(None)
+        out = json.loads(raw)
+        assert out["success"] is False and out["error_type"] == "origin_changed"
+        assert out.get("filled_fields", 0) == 0
+        assert secret_eval.call_count == 1
+        assert "246810" not in raw
