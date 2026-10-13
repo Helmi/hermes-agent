@@ -231,3 +231,47 @@ def test_onepassword_backend_env_forwards_config_directory(monkeypatch):
     backend = OnePasswordLoginBackend({"enabled": True})
 
     assert backend._env(None)["OP_CONFIG_DIR"] == "/tmp/op-config"
+
+
+@pytest.mark.parametrize("method, suffix, result", [
+    ("resolve_password", ["--fields", "label=password", "--reveal"], "fixture-password"),
+    ("resolve_otp", ["--otp"], "123456"),
+])
+def test_onepassword_service_account_resolves_in_items_own_vault(method, suffix, result):
+    from agent.vault_backends.onepassword import OnePasswordLoginBackend
+
+    backend = OnePasswordLoginBackend({"enabled": True})
+    backend._service_token = "fixture-service-token"
+    metadata = json.dumps([
+        {"id": "target", "title": "Target", "vault": {"id": "vault-a"},
+         "urls": [{"href": "https://example.com"}]},
+        {"id": "other", "title": "Other", "vault": {"id": "vault-b"},
+         "urls": [{"href": "https://other.example.com"}]},
+    ])
+    with patch.object(backend, "_run", side_effect=[metadata, result + "\n"]) as run:
+        assert getattr(backend, method)("op:target") == result
+    assert run.call_args_list[1].args == (
+        "item", "get", "target", "--vault", "vault-a", *suffix)
+
+
+def test_onepassword_service_account_missing_vault_fails_before_secret_lookup():
+    from agent.vault_backends.onepassword import OnePasswordLoginBackend
+
+    backend = OnePasswordLoginBackend({"enabled": True})
+    backend._service_token = "fixture-service-token"
+    with patch.object(backend, "_run", return_value="[]") as run:
+        with pytest.raises(RuntimeError, match="item vault is unavailable"):
+            backend.resolve_password("op:missing")
+    assert run.call_count == 1
+    assert run.call_args.args[:2] == ("item", "list")
+
+
+def test_onepassword_desktop_auth_preserves_unscoped_lookup_without_vault_metadata():
+    from agent.vault_backends.onepassword import OnePasswordLoginBackend
+
+    backend = OnePasswordLoginBackend({"enabled": True})
+    backend._service_token = ""
+    with patch.object(backend, "is_unlocked", return_value=True), \
+         patch.object(backend, "_run", side_effect=["[]", "fixture-password"]) as run:
+        assert backend.resolve_password("op:target") == "fixture-password"
+    assert run.call_args.args == ("item", "get", "target", "--fields", "label=password", "--reveal")
