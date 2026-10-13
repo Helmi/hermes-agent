@@ -50,7 +50,9 @@ _CHECKOUT_HEURISTICS = (
 
 _EXCLUDED_AUTOCOMPLETE = {"new-password", "one-time-code"}
 
-_RE_EXCLUDED_PASSWORD = re.compile(r"\b(?:new|confirm|create|repeat)\s*password\b")
+_RE_EXCLUDED_PASSWORD = re.compile(
+    r"\b(?:(?:new|confirm(?:ation)?|create|repeat|reset)\s*password|password\s*confirmation)\b"
+)
 _RE_EMAIL = re.compile(r"\b(?:e[\s-]?mail|email address)\b")
 _RE_TEL = re.compile(r"\b(?:phone|telephone|mobile)\b")
 _RE_USERNAME = re.compile(
@@ -97,12 +99,22 @@ class ClassifiedLoginControl:
     token: str
 
 
-def classify_login_control(control: LoginControl) -> Optional[ClassifiedLoginControl]:
-    """Classify one control, or return None if it is not a login fill target."""
+def classify_login_control(
+    control: LoginControl,
+    *,
+    allow_new_password: bool = False,
+) -> Optional[ClassifiedLoginControl]:
+    """Classify one control, or return None if it is not a login fill target.
+
+    ``new-password`` remains excluded by default. Callers may opt in only for
+    a narrowly verified site compatibility case; one-time-code and
+    new/confirm/create/repeat password-label exclusions always remain active.
+    """
     autocomplete_tokens = [
         t for t in control.autocomplete.lower().split() if t
     ]
-    if any(t in _EXCLUDED_AUTOCOMPLETE for t in autocomplete_tokens):
+    if any(t in _EXCLUDED_AUTOCOMPLETE for t in autocomplete_tokens
+           if t != "new-password" or not (allow_new_password and control.type == "password")):
         return None
 
     for token in LOGIN_AUTOFILL_TOKENS:
@@ -259,19 +271,31 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
       .split(/\\s+/).filter(Boolean)
       .map((id) => { const n = document.getElementById(id); return n ? (n.textContent || "") : ""; })
       .join(" ");
+    const explicitLabel = [
+      ...labels,
+      element.getAttribute("aria-label") || "",
+      ariaText,
+      element.getAttribute("placeholder") || "",
+      element.getAttribute("title") || "",
+    ].join(" ").trim();
+    // Some sites render a field caption as a local wrapper text node instead
+    // of associating it with the input. Preserve only an exact, short local
+    // caption; broad container text would make unrelated controls look named.
+    const localCodeCaption = !explicitLabel ? (() => {
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 2; depth += 1, node = node.parentElement) {
+        const text = (node.innerText || "").replace(/\\s+/g, " ").trim();
+        if (/^code$/i.test(text)) return text;
+      }
+      return "";
+    })() : "";
     const resolvedFormIndex = element.form ? forms.indexOf(element.form) : -1;
     return [{
       autocomplete: element.autocomplete || "",
       formIndex: resolvedFormIndex >= 0 ? resolvedFormIndex : null,
       index,
       maxLength: element.maxLength > 0 ? element.maxLength : null,
-      label: [
-        ...labels,
-        element.getAttribute("aria-label") || "",
-        ariaText,
-        element.getAttribute("placeholder") || "",
-        element.getAttribute("title") || "",
-      ].join(" "),
+      label: explicitLabel || localCodeCaption,
       name: [element.name, element.id].join(" "),
       type: element.tagName === "SELECT" ? "select" : (element.type || ""),
     }];
@@ -280,14 +304,19 @@ _LOGIN_CONTROL_INSPECTION_JS_TEMPLATE = """(() => {
 })()"""
 
 
-def build_fill_js(fills: list[dict[str, Any]], expected_origin: str, nonce: str = "") -> str:
+def build_fill_js(
+    fills: list[dict[str, Any]],
+    expected_origin: str,
+    nonce: str = "",
+    expected_path: str = "",
+) -> str:
     """Build a JS expression that fills the selected controls and reports only a count. The
     returned expression never echoes the values back.
 
-    ``expected_origin`` is asserted against ``window.location.origin`` synchronously inside the SAME
-    evaluated script, immediately before any write. If the page navigated between inspection and fill
-    (TOCTOU), the script writes nothing and returns ``{"refused": "origin_changed", "found": <actual>}``:
-    proof scope equals mutation scope (#88706). Targets resolve by the ``<nonce>:<index>`` stamp of
+    ``expected_origin`` (and optionally ``expected_path``) is asserted against the current location
+    synchronously inside the SAME evaluated script, immediately before any write. If the page navigated
+    between inspection and fill (TOCTOU), the script writes nothing and returns a refusal: proof scope
+    equals mutation scope (#88706). Targets resolve by the ``<nonce>:<index>`` stamp of
     THIS inspection; a ``current-password`` fill additionally requires ``type=password``; ``<select>``
     controls (country, state, expiry month) match an option by value or visible text. No marker is
     left on filled controls so later model-driven DOM reads cannot address them deterministically.
@@ -296,6 +325,7 @@ def build_fill_js(fills: list[dict[str, Any]], expected_origin: str, nonce: str 
         [{"index": f["index"], "token": f.get("token", "current-password"), "value": f["value"]} for f in fills]
     )
     return (_FILL_JS_TEMPLATE.replace("__EXPECTED_ORIGIN__", json.dumps(expected_origin))
+            .replace("__EXPECTED_PATH__", json.dumps(expected_path))
             .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce)))
 
 
@@ -303,6 +333,10 @@ _FILL_JS_TEMPLATE = """(() => {
   const expectedOrigin = __EXPECTED_ORIGIN__;
   if (window.location.origin !== expectedOrigin) {
     return JSON.stringify({ refused: "origin_changed", found: window.location.origin });
+  }
+  const expectedPath = __EXPECTED_PATH__;
+  if (expectedPath && window.location.pathname !== expectedPath) {
+    return JSON.stringify({ refused: "path_changed", found: window.location.pathname });
   }
   const fills = __FILLS__;
   const nonce = __NONCE__;

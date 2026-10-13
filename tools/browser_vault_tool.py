@@ -29,6 +29,7 @@ import json
 import secrets
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -175,12 +176,20 @@ def _parse_json_result(raw: Any) -> Any:
     return raw
 
 
-def _current_page_origin(task_id: str) -> Optional[str]:
+def _current_page_url(task_id: str) -> Optional[str]:
+    """Return the current page URL through the supervisor-backed non-secret eval path."""
     res = _eval_js(task_id, "window.location.href")
     if not res.get("success"):
         return None
     href = str(res.get("result") or "").strip().strip('"').strip("'")
     if not href or href == "about:blank":
+        return None
+    return href
+
+
+def _current_page_origin(task_id: str) -> Optional[str]:
+    href = _current_page_url(task_id)
+    if not href:
         return None
     try:
         from agent.vault_store import normalize_origin
@@ -188,6 +197,49 @@ def _current_page_origin(task_id: str) -> Optional[str]:
         return normalize_origin(href)
     except Exception:
         return None
+
+
+def _allows_tiktok_new_password(url: Optional[str]) -> bool:
+    """The sole compatibility exception for TikTok's mislabeled login input."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (parsed.scheme == "https"
+            and parsed.netloc.lower() == "www.tiktok.com"
+            and parsed.path == "/login/phone-or-email/email")
+
+
+def _allows_instagram_generic_code(url: Optional[str]) -> bool:
+    """The sole OTP compatibility exception for Instagram's unassociated Code caption."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    return (parsed.scheme == "https"
+            and parsed.netloc.lower() == "www.instagram.com"
+            and parsed.path == "/accounts/login/two_step_verification")
+
+
+def _instagram_generic_code_control(controls):
+    """Recognize Instagram's single generic Code field, and nothing broader.
+
+    This is intentionally not part of the general OTP classifier: the route
+    is separately pinned at both inspection and write time, and the fallback
+    accepts exactly one visible text/tel control whose resolved local caption
+    is exactly ``Code``.
+    """
+    candidates = [c for c in controls if c.type.lower() in ("text", "tel")]
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    if " ".join(candidate.label.split()).casefold() != "code":
+        return None
+    return candidate
 
 
 # Per kind: a JS probe that is truthy on a tab holding the form this kind fills.
@@ -339,7 +391,7 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
     from agent.redact import register_vault_redaction_value
     from agent.vault_backends import backend_for_handle
     from agent.vault_backends.unlock import can_prompt_here, get_code_prompt_callback
-    from agent.vault_login_classifier import LoginControl, build_fill_js, build_inspection_js, build_otp_fills, classify_otp_controls
+    from agent.vault_login_classifier import ClassifiedLoginControl, LoginControl, build_fill_js, build_inspection_js, build_otp_fills, classify_otp_controls
 
     effective_task_id = task_id or "default"
     _focus_bound_origin(effective_task_id, "", "otp")
@@ -347,13 +399,21 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
     if not origin:
         return json.dumps({"success": False, "error": "No page with a code field is open."})
     site = origin.split("://", 1)[-1]
+    # Do not surface this URL: it can carry a provider's opaque auth context.
+    page_url = _current_page_url(effective_task_id)
+    allow_instagram_generic_code = _allows_instagram_generic_code(page_url)
 
     nonce = secrets.token_hex(8)
     inspect = _eval_js(effective_task_id, build_inspection_js(nonce))
     raw_controls = _parse_json_result(inspect.get("result")) if inspect.get("success") else None
     if isinstance(raw_controls, str):
         raw_controls = _parse_json_result(raw_controls)
-    otp_controls = classify_otp_controls([LoginControl.from_dict(r) for r in (raw_controls or []) if isinstance(r, dict)])
+    controls = [LoginControl.from_dict(r) for r in (raw_controls or []) if isinstance(r, dict)]
+    otp_controls = classify_otp_controls(controls)
+    if not otp_controls and allow_instagram_generic_code:
+        instagram_control = _instagram_generic_code_control(controls)
+        if instagram_control is not None:
+            otp_controls = [ClassifiedLoginControl(instagram_control, 60, "one-time-code")]
     if not otp_controls:
         return json.dumps({"success": False, "error_type": "no_code_field",
                            "error": ("No one-time-code field on the current page. If the site wants a passkey, hardware key or "
@@ -382,14 +442,22 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
 
     register_vault_redaction_value(code)
     fills = build_otp_fills(otp_controls, code)
-    result = _eval_js_secret(effective_task_id, build_fill_js(fills, expected_origin=origin, nonce=nonce))
+    result = _eval_js_secret(
+        effective_task_id,
+        build_fill_js(
+            fills,
+            expected_origin=origin,
+            nonce=nonce,
+            expected_path="/accounts/login/two_step_verification" if allow_instagram_generic_code else "",
+        ),
+    )
     del code
     if not result.get("success"):
         return json.dumps({"success": False, "error": str(result.get("error") or "fill failed")[:200]})
     parsed = _parse_json_result(result.get("result"))
     if isinstance(parsed, str):
         parsed = _parse_json_result(parsed)
-    if isinstance(parsed, dict) and parsed.get("refused") == "origin_changed":
+    if isinstance(parsed, dict) and parsed.get("refused") in ("origin_changed", "path_changed"):
         return json.dumps({"success": False, "error_type": "origin_changed", "error": "The page navigated before the code could be entered. Nothing was written."})
     filled = int(parsed.get("filled", 0)) if isinstance(parsed, dict) else 0
     return json.dumps({"success": bool(filled), "filled_fields": filled, "origin": origin, "source": source,
@@ -478,6 +546,9 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
         )
 
     # ── Inspect + classify page controls ────────────────────────────────────
+    # Capture the full URL through the supervisor-backed page API only after the
+    # exact-origin pre-check; the TikTok exception is host-and-path scoped.
+    page_url = _current_page_url(effective_task_id)
     nonce = secrets.token_hex(8)  # binds this fill to THIS inspection's stamps
     inspect = _eval_js(effective_task_id, build_inspection_js(nonce))
     if not inspect.get("success"):
@@ -490,12 +561,14 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     if not isinstance(raw_controls, list):
         return json.dumps({"success": False, "error": "Page input inspection returned no usable controls."})
 
-    classify = classify_login_control if meta.kind == "login" else classify_checkout_control
+    allow_tiktok_new_password = meta.kind == "login" and _allows_tiktok_new_password(page_url)
     classified: list[ClassifiedLoginControl] = []
     for raw in raw_controls:
         if not isinstance(raw, dict):
             continue
-        result = classify(LoginControl.from_dict(raw))
+        control = LoginControl.from_dict(raw)
+        result = (classify_login_control(control, allow_new_password=allow_tiktok_new_password)
+                  if meta.kind == "login" else classify_checkout_control(control))
         if result is not None:
             classified.append(result)
     if not classified:
@@ -526,7 +599,13 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
 
     try:
         fill_result = _eval_js_secret(
-            effective_task_id, build_fill_js(fills, expected_origin=page_origin, nonce=nonce)
+            effective_task_id,
+            build_fill_js(
+                fills,
+                expected_origin=page_origin,
+                nonce=nonce,
+                expected_path="/login/phone-or-email/email" if allow_tiktok_new_password else "",
+            ),
         )
     except Exception as exc:
         # Strip any secret material from exception text before surfacing.
@@ -543,7 +622,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     parsed = _parse_json_result(fill_result.get("result"))
     if isinstance(parsed, str):
         parsed = _parse_json_result(parsed)
-    if isinstance(parsed, dict) and parsed.get("refused") == "origin_changed":
+    if isinstance(parsed, dict) and parsed.get("refused") in ("origin_changed", "path_changed"):
         return json.dumps(
             {
                 "success": False,
