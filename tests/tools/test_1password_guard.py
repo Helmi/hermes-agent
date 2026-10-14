@@ -23,13 +23,17 @@ import textwrap
 import pytest
 
 from tools.approval import (
-    HARDLINE_PATTERNS,
     check_all_command_guards,
-    detect_hardline_command,
     disable_session_yolo,
     enable_session_yolo,
+)
+from tools.approval_context import (
     reset_current_session_key,
     set_current_session_key,
+)
+from tools.approval_detection import (
+    HARDLINE_PATTERNS,
+    detect_hardline_command,
 )
 
 # Synthetic sentinel — a value that must NEVER appear in captured output.
@@ -167,7 +171,7 @@ def test_session_yolo_cannot_bypass_op_guard(clean_session):
 
 def test_approvals_mode_off_cannot_bypass_op_guard(clean_session, monkeypatch):
     """approvals.mode=off must not bypass the 1Password guard."""
-    import tools.approval_context as approval_context
+    from tools import approval_context
     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
     for cmd in ["op read op://v/i/f", "op item get item"]:
         result = check_all_command_guards(cmd, "local")
@@ -178,7 +182,7 @@ def test_approvals_mode_off_cannot_bypass_op_guard(clean_session, monkeypatch):
 def test_cron_approve_mode_cannot_bypass_op_guard(clean_session, monkeypatch):
     """Cron approve mode must not bypass the 1Password guard."""
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-    import tools.approval_context as approval_context
+    from tools import approval_context
     monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "approve")
     for cmd in ["op read op://v/i/f", "op item get item"]:
         result = check_all_command_guards(cmd, "local")
@@ -256,7 +260,7 @@ def test_fake_op_read_emits_sentinel(fake_op):
     """Sanity: the fake op read DOES emit the sentinel (proving the fake works)."""
     result = subprocess.run(
         [fake_op, "read", "op://vault/item/field"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=5, check=False,
     )
     assert SENTINEL in result.stdout, "fake op read should emit sentinel"
 
@@ -265,7 +269,7 @@ def test_fake_op_item_get_emits_sentinel(fake_op):
     """Sanity: the fake op item get DOES emit the sentinel."""
     result = subprocess.run(
         [fake_op, "item", "get", "my-item"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=5, check=False,
     )
     assert SENTINEL in result.stdout, "fake op item get should emit sentinel"
 
@@ -274,7 +278,7 @@ def test_fake_op_run_does_not_emit_sentinel(fake_op):
     """Sanity: the fake op run does NOT emit the sentinel to stdout."""
     result = subprocess.run(
         [fake_op, "run", "--", "echo", "child-output"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=5, check=False,
     )
     assert SENTINEL not in result.stdout, "op run must not leak sentinel to stdout"
     assert "child-output" in result.stdout, "op run should execute the child command"
@@ -312,7 +316,7 @@ def test_guard_allows_op_run_execution(clean_session, fake_op):
     # Actually execute to prove the sentinel doesn't leak
     proc = subprocess.run(
         [fake_op, "run", "--", "echo", "safe-output"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=5, check=False,
     )
     assert SENTINEL not in proc.stdout
     assert "safe-output" in proc.stdout
