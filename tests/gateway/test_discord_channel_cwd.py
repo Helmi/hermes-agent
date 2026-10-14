@@ -17,7 +17,7 @@ def _ensure_discord_mock():
     every later test module that imports the real package silently skips.
     """
     try:
-        import discord  # noqa: F401
+        import discord
         return
     except ImportError:
         pass
@@ -188,6 +188,7 @@ class TestDiscordAdapterChannelCwd:
         adapter = _make_adapter()
         adapter.config.extra = {"channel_cwds": {"200": str(tmp_path)}}
         adapter.build_source = MagicMock(return_value=SimpleNamespace())
+        adapter._format_thread_chat_name = MagicMock(return_value="new-thread")
         adapter._get_effective_topic = MagicMock(return_value=None)
         adapter.handle_message = AsyncMock()
 
@@ -197,7 +198,8 @@ class TestDiscordAdapterChannelCwd:
             user=SimpleNamespace(id=1, display_name="Brenner"),
         )
 
-        await adapter._dispatch_thread_session(interaction, "999", "new-thread", "hello")
+        thread = SimpleNamespace(id=999, name="new-thread", parent=None, parent_id=200)
+        await adapter._dispatch_thread_session(interaction, thread, "hello")
 
         dispatched_event = adapter.handle_message.await_args.args[0]
         assert dispatched_event.channel_cwd == str(tmp_path)
@@ -250,8 +252,8 @@ async def test_run_agent_wires_channel_cwd_to_session_and_terminal(monkeypatch, 
     (tmp_path / "config.yaml").write_text("agent:\n  system_prompt: Global prompt\n", encoding="utf-8")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
-    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "load_hermes_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", dict)
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
     monkeypatch.setattr(
         gateway_run,
@@ -264,11 +266,11 @@ async def test_run_agent_wires_channel_cwd_to_session_and_terminal(monkeypatch, 
         },
     )
 
-    import hermes_cli.tools_config as tools_config
+    from hermes_cli import tools_config
 
     monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
 
-    import tools.terminal_tool as terminal_tool
+    from tools import terminal_tool
 
     registered = {}
 
@@ -301,8 +303,8 @@ async def test_run_agent_without_channel_cwd_registers_nothing(monkeypatch, tmp_
     (tmp_path / "config.yaml").write_text("agent:\n  system_prompt: Global prompt\n", encoding="utf-8")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
-    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "load_hermes_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", dict)
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
     monkeypatch.setattr(
         gateway_run,
@@ -315,11 +317,11 @@ async def test_run_agent_without_channel_cwd_registers_nothing(monkeypatch, tmp_
         },
     )
 
-    import hermes_cli.tools_config as tools_config
+    from hermes_cli import tools_config
 
     monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
 
-    import tools.terminal_tool as terminal_tool
+    from tools import terminal_tool
 
     registered = {}
 
