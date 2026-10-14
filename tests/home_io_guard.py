@@ -96,17 +96,23 @@ class HomeIOGuard:
                     return
             # The interpreter's own installation (a PM-managed python under ~/.hermes/tools):
             # stdlib source reads (linecache, traceback) are not Hermes state either, nor is
-            # realpath() walking up through its ancestors.
+            # realpath() walking up through its ancestors. Prefixes are resolved at import,
+            # so match both the lexical path and its realpath: a generation dir reached
+            # through a symlink (venv → cpython-X → cpython-X.Y.Z) makes the two differ,
+            # and the lexical refusal below would otherwise fire before the resolved
+            # match is ever consulted.
+            if resolved is None:
+                resolved = _normcase(os.path.realpath(absolute))
             for prefix in _INTERPRETER_PREFIX_STRS:
                 if _within(absolute, prefix) or (metadata and _contains(absolute, prefix)):
+                    return
+                if _within(resolved, prefix) or (metadata and _contains(resolved, prefix)):
                     return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             for root in roots:
                 if _within(absolute, root):
                     self.refuse(value)
-            if resolved is None:
-                resolved = _normcase(os.path.realpath(absolute))
             if metadata and resolved in roots:
                 return
             # A fixture symlink to the running interpreter resolves into its installation.
