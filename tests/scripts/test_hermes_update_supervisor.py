@@ -116,32 +116,71 @@ def test_inherited_flock_remains_exclusive_after_parent_exit(tmp_path):
 
 
 def test_worker_collects_all_profile_failures_and_never_stops_on_first(supervisor, layout, monkeypatch):
-    source, home, state = layout; path = receipt(supervisor, state, source, home, profiles=["hermie", "mia"]); calls = []
+    source, home, state = layout; path = receipt(supervisor, state, source, home, profiles=["hermie", "mia"]); calls = []; restarted = []
     monkeypatch.setattr(supervisor, "git", lambda *_: "" if _[-1] == "--porcelain" else "b" * 40)
     monkeypatch.setattr(supervisor, "fork_main_sha", lambda _: "b" * 40)
     def fake_run(argv, **kwargs):
         calls.append(argv)
         return (1, "") if argv[-1] == "restart" and argv[2] == "hermie" else (0, "")
     monkeypatch.setattr(supervisor, "run_command", fake_run)
-    monkeypatch.setattr(supervisor, "wait_for_health", lambda home, sha, deadline: {"code_sha": sha})
+    def fake_restart(_launcher, profile, *_args, **_kwargs):
+        restarted.append(profile)
+        if profile == "hermie":
+            raise RuntimeError("restart failed")
+        return {"code_sha": "b" * 40}
+    monkeypatch.setattr(supervisor, "restart_and_wait_for_health", fake_restart)
     monkeypatch.setattr(supervisor, "exact_origin_exists", lambda *_: False)
     assert supervisor.worker(path) == 1
     data = supervisor.read_state(path)
     assert data["status"] == "failed" and "error" in data["gateway_results"]["hermie"]
-    assert any(call[2] == "mia" and call[-1] == "restart" for call in calls)
+    assert restarted == ["hermie", "mia"]
 
 
 def test_health_requires_live_pid_start_heartbeat_and_identity(supervisor, layout, monkeypatch):
     _, home, _ = layout
     pid = os.getpid(); started = 123
     monkeypatch.setattr(supervisor, "process_start_time", lambda _: started)
-    payload = {"gateway_state": "running", "hermes_home": str(home), "code_sha": "b" * 40, "pid": pid,
+    payload = {"gateway_state": "running", "code_sha": "b" * 40, "pid": pid,
                "start_time": started, "updated_at": "2030-01-01T00:00:00+00:00"}
     (home / "gateway_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    (home / "gateway.pid").write_text(json.dumps({"pid": pid, "start_time": started,
+                                                    "hermes_home": str(home)}), encoding="utf-8")
     assert supervisor.health_record(home, "b" * 40)["pid"] == pid
     payload["start_time"] = 999; (home / "gateway_state.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RuntimeError, match="identity"):
         supervisor.health_record(home, "b" * 40)
+
+
+def test_restart_retries_only_the_explicit_busy_refusal(supervisor, layout, monkeypatch):
+    source, home, _ = layout; attempts = []; sleeps = []
+    busy = ("Refusing to restart gateway: 1 live session(s) would be interrupted. "
+            "Let them finish before restarting; --yes interrupts.")
+    outcomes = [(1, busy), (0, "restarted")]
+    monkeypatch.setattr(supervisor, "run_command", lambda argv, **kwargs: attempts.append(argv) or outcomes.pop(0))
+    monkeypatch.setattr(supervisor, "wait_for_health", lambda *_: {"ready": True})
+    monkeypatch.setattr(supervisor.time, "sleep", sleeps.append)
+    assert supervisor.restart_and_wait_for_health(source / ".hermes/bin/hermes", "hermie", home, "b" * 40,
+                                                  timeout=10, log=home / "supervisor.log") == {"ready": True}
+    assert len(attempts) == 2 and sleeps == [1.0]
+
+
+def test_restart_refusal_does_not_retry_other_errors(supervisor, layout, monkeypatch):
+    source, home, _ = layout; attempts = []
+    monkeypatch.setattr(supervisor, "run_command", lambda argv, **kwargs: attempts.append(argv) or (1, "bad configuration"))
+    with pytest.raises(RuntimeError, match="exited 1"):
+        supervisor.restart_and_wait_for_health(source / ".hermes/bin/hermes", "hermie", home, "b" * 40,
+                                                timeout=10, log=home / "supervisor.log")
+    assert len(attempts) == 1
+
+
+def test_restart_health_readiness_is_short_and_bounded(supervisor, layout, monkeypatch):
+    source, home, _ = layout; deadlines = []
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(supervisor, "run_command", lambda *_args, **_kwargs: (0, "restarted"))
+    monkeypatch.setattr(supervisor, "wait_for_health", lambda _home, _sha, deadline: deadlines.append(deadline) or {"ready": True})
+    supervisor.restart_and_wait_for_health(source / ".hermes/bin/hermes", "hermie", home, "b" * 40,
+                                           timeout=1800, log=home / "supervisor.log")
+    assert deadlines == [100.0 + supervisor._HEALTH_READINESS_TIMEOUT_S]
 
 
 def test_timeout_is_uncertain_and_blocks_new_transaction(supervisor, layout, monkeypatch):
