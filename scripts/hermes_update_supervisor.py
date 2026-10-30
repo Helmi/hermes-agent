@@ -168,12 +168,36 @@ def run_command(argv: list[str], *, timeout: float, log: Path, home: Path) -> tu
         return result.returncode, output
 
 
+_START_TIME_DRIFT_TOLERANCE = 200
+_HEALTH_READINESS_TIMEOUT_S = 60.0
+_BUSY_RESTART_REFUSAL = (
+    "Refusing to restart gateway:",
+    "live session(s) would be interrupted",
+    "Let them finish",
+    "--yes interrupts",
+)
+
+
 def process_start_time(pid: int) -> int | None:
+    """Return the native, clock-step-stable process-birth fingerprint."""
     try:
         import psutil  # type: ignore
-        return round(psutil.Process(pid).create_time() * 100)
+        from hermes_cli.process_identity import process_birth
+        return round(process_birth(psutil.Process(pid)) * 100)
     except Exception:
         return None
+
+
+def start_times_match(recorded: Any, current: Any) -> bool:
+    try:
+        return abs(int(current) - int(recorded)) <= _START_TIME_DRIFT_TOLERANCE
+    except (TypeError, ValueError):
+        return False
+
+
+def is_busy_restart_refusal(code: int, output: str) -> bool:
+    """Only retry the native drain guard; every other restart failure is terminal."""
+    return code != 0 and all(fragment in output for fragment in _BUSY_RESTART_REFUSAL)
 
 
 def parse_updated_at(value: Any) -> float | None:
@@ -188,21 +212,24 @@ def parse_updated_at(value: Any) -> float | None:
 def health_record(home: Path, expected_sha: str, *, max_age_s: float = 120) -> dict[str, Any]:
     try:
         state = json.loads((home / "gateway_state.json").read_text(encoding="utf-8"))
+        pid_record = json.loads((home / "gateway.pid").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         raise RuntimeError("gateway runtime status is unavailable") from None
     if not isinstance(state, dict) or state.get("gateway_state") != "running":
         raise RuntimeError(f"gateway is not ready (state={state.get('gateway_state') if isinstance(state, dict) else None!r})")
-    if Path(str(state.get("hermes_home", ""))).resolve() != home.resolve():
-        raise RuntimeError("gateway runtime status belongs to another HERMES_HOME")
+    if not isinstance(pid_record, dict) or Path(str(pid_record.get("hermes_home", ""))).resolve() != home.resolve():
+        raise RuntimeError("gateway PID record belongs to another HERMES_HOME")
     if state.get("code_sha") != expected_sha:
         raise RuntimeError(f"gateway code SHA {state.get('code_sha')!r} does not equal expected {expected_sha}")
-    pid, recorded_start = state.get("pid"), state.get("start_time")
-    if not isinstance(pid, int) or not isinstance(recorded_start, int) or process_start_time(pid) != recorded_start:
+    pid, state_start, pid_start = state.get("pid"), state.get("start_time"), pid_record.get("start_time")
+    if (not isinstance(pid, int) or pid_record.get("pid") != pid
+            or not start_times_match(state_start, pid_start)
+            or not start_times_match(pid_start, process_start_time(pid))):
         raise RuntimeError("gateway PID/start-time identity is not live")
     updated_at = parse_updated_at(state.get("updated_at"))
     if updated_at is None or time.time() - updated_at > max_age_s:
         raise RuntimeError("gateway heartbeat is stale or invalid")
-    return {key: state.get(key) for key in ("pid", "start_time", "updated_at", "code_sha", "code_version", "hermes_home")}
+    return {key: state.get(key) for key in ("pid", "start_time", "updated_at", "code_sha", "code_version")} | {"hermes_home": pid_record["hermes_home"]}
 
 
 def wait_for_health(home: Path, expected_sha: str, deadline: float) -> dict[str, Any]:
@@ -214,6 +241,28 @@ def wait_for_health(home: Path, expected_sha: str, deadline: float) -> dict[str,
             last_error = str(exc)
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise RuntimeError(last_error)
+
+
+def restart_and_wait_for_health(launcher: Path, profile: str, home: Path, expected_sha: str, *, timeout: float, log: Path) -> dict[str, Any]:
+    """Respect the native drain guard, retrying only its explicit busy refusal."""
+    deadline = time.monotonic() + timeout
+    backoff = 1.0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("gateway restart remained busy until its bounded deadline")
+        code, output = run_command([str(launcher), "-p", profile, "gateway", "restart"],
+                                   timeout=min(remaining, 120.0), log=log, home=home)
+        if code == 0:
+            readiness_deadline = time.monotonic() + min(timeout, _HEALTH_READINESS_TIMEOUT_S)
+            return wait_for_health(home, expected_sha, readiness_deadline)
+        if not is_busy_restart_refusal(code, output):
+            raise RuntimeError(f"gateway restart exited {code}")
+        sleep_for = min(backoff, max(0.0, deadline - time.monotonic()))
+        if sleep_for <= 0:
+            raise RuntimeError("gateway restart remained busy until its bounded deadline")
+        time.sleep(sleep_for)
+        backoff = min(backoff * 2, 15.0)
 
 
 def completion_text(receipt: dict[str, Any]) -> str:
@@ -297,12 +346,10 @@ def worker(receipt_path: Path, inherited_lock_fd: int | None = None) -> int:
         for profile in receipt["profiles"]:
             target_home = profile_home(home, receipt["origin"]["profile"], profile)
             try:
-                code, _ = run_command([str(canonical_launcher(source)), "-p", profile, "gateway", "restart"],
-                                      timeout=receipt["restart_timeout_s"], log=log, home=target_home)
-                if code:
-                    raise RuntimeError(f"gateway restart exited {code}")
-                results[profile] = {"health": wait_for_health(target_home, receipt["expected_sha"],
-                                                               time.monotonic() + receipt["restart_timeout_s"])}
+                health = restart_and_wait_for_health(canonical_launcher(source), profile, target_home,
+                                                     receipt["expected_sha"], timeout=receipt["restart_timeout_s"],
+                                                     log=log)
+                results[profile] = {"health": health}
             except Exception as exc:
                 results[profile] = {"error": str(exc)}
         update_state(receipt_path, gateway_results=results)
