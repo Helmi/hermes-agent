@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Detached, serialized Hermes source-update supervisor.
 
-The launcher records an explicit target and origin route, then hands an inherited
-advisory lock to the detached worker.  The worker uses only supported Hermes CLI
-entry points; it never signals gateway processes or bypasses updater safeguards.
+The launcher freezes a clean installed SHA and an explicit, remote-verified target,
+then hands its advisory lock to a detached worker. The worker uses supported Hermes
+CLI entry points only; it neither signals gateways nor bypasses their drain guards.
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import fcntl
 import json
 import os
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-_TERMINAL = {"succeeded", "failed", "orphaned"}
+_TERMINAL = {"succeeded", "failed", "orphaned", "uncertain"}
 
 
 def now() -> int:
@@ -30,14 +31,22 @@ def now() -> int:
 
 def atomic_write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+
+
+# Kept local to avoid importing the live gateway runtime into this detached helper.
+import contextlib
 
 
 def read_state(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("schema") != 2:
+    if not isinstance(data, dict) or data.get("schema") != 3:
         raise ValueError("invalid supervisor receipt")
     return data
 
@@ -71,18 +80,31 @@ def git(source: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def freeze_target(source: Path, expected_sha: str | None) -> str:
+def fork_main_sha(source: Path) -> str:
+    """Read the configured fork remote directly; do not trust a stale local ref."""
+    remote = git(source, "remote", "get-url", "fork")
+    result = subprocess.run(["git", "ls-remote", remote, "refs/heads/main"], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError("could not resolve fork main with bounded git ls-remote")
+    sha = result.stdout.split()[0]
+    if not _SHA.fullmatch(sha):
+        raise RuntimeError("fork main did not resolve to a full commit SHA")
+    return sha
+
+
+def freeze_target(source: Path, expected_sha: str | None) -> dict[str, str]:
     if git(source, "status", "--porcelain"):
         raise ValueError("refusing dirty source checkout")
-    head = git(source, "rev-parse", "HEAD")
-    target = expected_sha or head
+    pre_sha = git(source, "rev-parse", "HEAD")
+    target = expected_sha or pre_sha
     if not _SHA.fullmatch(target):
         raise ValueError("expected SHA must be a full lowercase 40-hex commit")
     if git(source, "rev-parse", f"{target}^{{commit}}") != target:
         raise ValueError("expected SHA is not a commit in the source checkout")
-    if head != target:
-        raise ValueError("source HEAD must equal the frozen expected SHA before handoff")
-    return target
+    if fork_main_sha(source) != target:
+        raise ValueError("expected SHA must exactly match fork main at handoff")
+    return {"pre_sha": pre_sha, "expected_sha": target}
 
 
 def route_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -95,16 +117,13 @@ def route_from_args(args: argparse.Namespace) -> dict[str, str]:
 
 
 def exact_origin_exists(home: Path, origin: dict[str, str]) -> bool:
-    """Require the requested session id AND all native route fields to match."""
     db = home / "state.db"
     if not db.is_file():
         return False
     try:
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
-            row = connection.execute(
-                "SELECT source, chat_id, thread_id, profile_name, origin_json FROM sessions WHERE id=?",
-                (origin["session_id"],),
-            ).fetchone()
+            row = connection.execute("SELECT source, chat_id, thread_id, profile_name, origin_json FROM sessions WHERE id=?",
+                                     (origin["session_id"],)).fetchone()
     except sqlite3.Error:
         return False
     if row is None or tuple(str(x or "") for x in row[:4]) != (
@@ -118,16 +137,18 @@ def exact_origin_exists(home: Path, origin: dict[str, str]) -> bool:
 
 
 def profile_home(origin_home: Path, origin_profile: str, profile: str) -> Path:
-    """Resolve each CLI call's profile home instead of retaining gateway-call internals."""
     return origin_home if profile == origin_profile else origin_home.parent / profile
 
 
 def command_env(home: Path) -> dict[str, str]:
-    """Do not inherit an invoking gateway's session/control internals."""
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("HERMES_") or key in {"HERMES_LOG_LEVEL"}}
+    """Keep native lifecycle context intact; only scope the requested profile home."""
+    env = os.environ.copy()
     env["HERMES_HOME"] = str(home)
     return env
+
+
+class CommandTimeout(RuntimeError):
+    pass
 
 
 def run_command(argv: list[str], *, timeout: float, log: Path, home: Path) -> tuple[int, str]:
@@ -138,33 +159,61 @@ def run_command(argv: list[str], *, timeout: float, log: Path, home: Path) -> tu
             result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     env=command_env(home), timeout=timeout, check=False, text=True)
         except subprocess.TimeoutExpired as exc:
-            # subprocess.run kills only its direct CLI child; receipt records uncertainty instead of replaying.
             stream.write(f"[timeout after {timeout}s: {exc}]\n")
             stream.flush()
-            raise RuntimeError(f"command timed out after {timeout}s; manual inspection required") from exc
+            raise CommandTimeout(f"command timed out after {timeout}s; descendants may still be active") from exc
         output = result.stdout or ""
-        stream.write(output)
-        stream.write(f"[exit={result.returncode}]\n")
+        stream.write(output + f"[exit={result.returncode}]\n")
         stream.flush()
         return result.returncode, output
 
 
-def health_record(home: Path, expected_sha: str) -> dict[str, Any]:
-    """Native gateway state proves a fresh process, heartbeat, home and code identity."""
-    path = home / "gateway_state.json"
+def process_start_time(pid: int) -> int | None:
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        import psutil  # type: ignore
+        return round(psutil.Process(pid).create_time() * 100)
+    except Exception:
+        return None
+
+
+def parse_updated_at(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def health_record(home: Path, expected_sha: str, *, max_age_s: float = 120) -> dict[str, Any]:
+    try:
+        state = json.loads((home / "gateway_state.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         raise RuntimeError("gateway runtime status is unavailable") from None
-    if not isinstance(state, dict):
-        raise RuntimeError("gateway runtime status is invalid")
-    if state.get("gateway_state") != "running":
-        raise RuntimeError(f"gateway is not ready (state={state.get('gateway_state')!r})")
+    if not isinstance(state, dict) or state.get("gateway_state") != "running":
+        raise RuntimeError(f"gateway is not ready (state={state.get('gateway_state') if isinstance(state, dict) else None!r})")
     if Path(str(state.get("hermes_home", ""))).resolve() != home.resolve():
         raise RuntimeError("gateway runtime status belongs to another HERMES_HOME")
     if state.get("code_sha") != expected_sha:
         raise RuntimeError(f"gateway code SHA {state.get('code_sha')!r} does not equal expected {expected_sha}")
-    return {key: state.get(key) for key in ("pid", "updated_at", "code_sha", "code_version")}
+    pid, recorded_start = state.get("pid"), state.get("start_time")
+    if not isinstance(pid, int) or not isinstance(recorded_start, int) or process_start_time(pid) != recorded_start:
+        raise RuntimeError("gateway PID/start-time identity is not live")
+    updated_at = parse_updated_at(state.get("updated_at"))
+    if updated_at is None or time.time() - updated_at > max_age_s:
+        raise RuntimeError("gateway heartbeat is stale or invalid")
+    return {key: state.get(key) for key in ("pid", "start_time", "updated_at", "code_sha", "code_version", "hermes_home")}
+
+
+def wait_for_health(home: Path, expected_sha: str, deadline: float) -> dict[str, Any]:
+    last_error = "gateway readiness deadline elapsed"
+    while time.monotonic() < deadline:
+        try:
+            return health_record(home, expected_sha)
+        except RuntimeError as exc:
+            last_error = str(exc)
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(last_error)
 
 
 def completion_text(receipt: dict[str, Any]) -> str:
@@ -174,17 +223,15 @@ def completion_text(receipt: dict[str, Any]) -> str:
 
 
 def parse_native_send_result(output: str) -> dict[str, Any]:
-    """Accept only a structured native send success, never an exit code alone."""
     decoder = json.JSONDecoder()
     for offset, char in enumerate(output):
-        if char != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(output[offset:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
+        if char == "{":
+            try:
+                value, _ = decoder.raw_decode(output[offset:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
     raise RuntimeError("native send did not return a JSON result")
 
 
@@ -198,19 +245,19 @@ def deliver_completion(receipt_path: Path, log: Path) -> None:
         return
     message = receipt_path.with_suffix(".message.txt")
     message.write_text(completion_text(receipt), encoding="utf-8")
-    launcher = canonical_launcher(source)
-    target = f"{origin['platform']}:{origin['chat_id']}:{origin['thread_id']}"
-    # No supported CLI/control-socket continuation API exists here. This is verified channel delivery only.
+    update_state(receipt_path, delivery_state="attempting", delivery_attempted_at_ns=now())
     try:
-        code, output = run_command([str(launcher), "-p", origin["profile"], "send", "--to", target,
-                                    "--file", str(message), "--json"], timeout=120, log=log, home=home)
+        code, output = run_command([str(canonical_launcher(source)), "-p", origin["profile"], "send", "--to",
+                                    f"{origin['platform']}:{origin['chat_id']}:{origin['thread_id']}", "--file", str(message), "--json"],
+                                   timeout=120, log=log, home=home)
         if code:
             raise RuntimeError(f"native send exited {code}")
         result = parse_native_send_result(output)
         if result.get("success") is not True:
             raise RuntimeError(f"native send did not confirm success: {result!r}")
     except Exception as exc:
-        update_state(receipt_path, delivery_state="failed", delivery_error=str(exc))
+        # 'attempting' is intentionally retained: external delivery is ambiguous and never retried automatically.
+        update_state(receipt_path, delivery_state="ambiguous", delivery_error=str(exc), delivery_wake="unsupported")
         return
     update_state(receipt_path, delivery_state="sent", delivery_wake="unsupported")
 
@@ -226,38 +273,45 @@ def worker(receipt_path: Path, inherited_lock_fd: int | None = None) -> int:
     receipt = read_state(receipt_path)
     if receipt["status"] != "queued":
         return 0
-    source, home = Path(receipt["source"]), Path(receipt["home"])
-    log = receipt_path.with_suffix(".log")
+    source, home, log = Path(receipt["source"]), Path(receipt["home"]), receipt_path.with_suffix(".log")
     lock = None
     try:
         if inherited_lock_fd is None:
             lock = (receipt_path.parent / ".lock").open("a+")
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         else:
-            # The launcher passed a locked open-file description. Keep it open until terminal state.
             os.fstat(inherited_lock_fd)
-        update_state(receipt_path, status="running", worker_pid=os.getpid(), started_at_ns=now())
-        launcher = canonical_launcher(source)
+        update_state(receipt_path, status="running", worker_pid=os.getpid(), worker_started_at_ns=now())
         if git(source, "status", "--porcelain"):
             raise RuntimeError("source became dirty after handoff")
+        if fork_main_sha(source) != receipt["expected_sha"]:
+            raise RuntimeError("fork main changed after handoff")
         update_home = profile_home(home, receipt["origin"]["profile"], receipt["update_profile"])
-        code, _ = run_command([str(launcher), "-p", receipt["update_profile"], "update", "--channel", "main",
-                               "--no-backup", "--yes", "--no-gateway-restart"], timeout=receipt["update_timeout_s"],
-                              log=log, home=update_home)
+        code, _ = run_command([str(canonical_launcher(source)), "-p", receipt["update_profile"], "update", "--channel", "main",
+                               "--no-backup", "--yes", "--no-gateway-restart"], timeout=receipt["update_timeout_s"], log=log, home=update_home)
         if code:
             raise RuntimeError(f"native update exited {code}")
         if git(source, "rev-parse", "HEAD") != receipt["expected_sha"]:
             raise RuntimeError("installed source SHA does not equal frozen expected SHA")
-        health: dict[str, Any] = {}
+        results: dict[str, Any] = {}
         for profile in receipt["profiles"]:
             target_home = profile_home(home, receipt["origin"]["profile"], profile)
-            code, _ = run_command([str(launcher), "-p", profile, "gateway", "restart"],
-                                  timeout=receipt["restart_timeout_s"], log=log, home=target_home)
-            if code:
-                raise RuntimeError(f"gateway restart for {profile} exited {code}")
-            health[profile] = health_record(target_home, receipt["expected_sha"])
+            try:
+                code, _ = run_command([str(canonical_launcher(source)), "-p", profile, "gateway", "restart"],
+                                      timeout=receipt["restart_timeout_s"], log=log, home=target_home)
+                if code:
+                    raise RuntimeError(f"gateway restart exited {code}")
+                results[profile] = {"health": wait_for_health(target_home, receipt["expected_sha"],
+                                                               time.monotonic() + receipt["restart_timeout_s"])}
+            except Exception as exc:
+                results[profile] = {"error": str(exc)}
+        update_state(receipt_path, gateway_results=results)
+        failures = {p: value["error"] for p, value in results.items() if "error" in value}
+        if failures:
+            raise RuntimeError(f"gateway activation failures: {failures}")
         finish(receipt_path, status="succeeded")
-        update_state(receipt_path, gateway_health=health)
+    except CommandTimeout as exc:
+        finish(receipt_path, status="uncertain", error=str(exc))
     except Exception as exc:
         finish(receipt_path, status="failed", error=str(exc))
     finally:
@@ -269,6 +323,16 @@ def worker(receipt_path: Path, inherited_lock_fd: int | None = None) -> int:
     return 0 if read_state(receipt_path)["status"] == "succeeded" else 1
 
 
+def unresolved_uncertain(state_dir: Path) -> bool:
+    for receipt_path in state_dir.glob("*.json"):
+        try:
+            if read_state(receipt_path).get("status") == "uncertain":
+                return True
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return False
+
+
 def start(args: argparse.Namespace) -> int:
     if not args.activate:
         raise ValueError("refusing to start without --activate")
@@ -276,37 +340,32 @@ def start(args: argparse.Namespace) -> int:
     origin = route_from_args(args)
     if not exact_origin_exists(home, origin):
         raise ValueError("origin session does not match the exact requested native route")
-    launcher = canonical_launcher(source)
-    del launcher
-    expected_sha = freeze_target(source, args.expected_sha)
+    canonical_launcher(source)
+    frozen = freeze_target(source, args.expected_sha)
     state_dir.mkdir(parents=True, exist_ok=True)
     lock = (state_dir / ".lock").open("a+")
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        lock.close()
-        raise RuntimeError("another supervisor transaction is active") from exc
-    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another supervisor transaction is active") from exc
+        if unresolved_uncertain(state_dir):
+            raise RuntimeError("an uncertain supervisor transaction requires explicit reconciliation")
         run_id, receipt_path = uuid.uuid4().hex, None
         receipt_path = state_path(state_dir, run_id)
-        receipt = {"schema": 2, "run_id": run_id, "status": "queued", "created_at_ns": now(),
-                   "source": str(source), "home": str(home), "expected_sha": expected_sha,
-                   "profiles": list(args.profile), "update_profile": args.update_profile,
+        receipt = {"schema": 3, "run_id": run_id, "status": "queued", "created_at_ns": now(), "source": str(source),
+                   "home": str(home), **frozen, "profiles": list(args.profile), "update_profile": args.update_profile,
                    "update_timeout_s": args.update_timeout_s, "restart_timeout_s": args.restart_timeout_s,
                    "origin": origin, "delivery_state": "pending"}
         atomic_write(receipt_path, receipt)
-        log = receipt_path.with_suffix(".log")
         os.set_inheritable(lock.fileno(), True)
-        with log.open("a", encoding="utf-8") as stream:
-            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", "--receipt",
-                                     str(receipt_path), "--lock-fd", str(lock.fileno())], stdin=subprocess.DEVNULL,
-                                    stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
-                                    close_fds=True, pass_fds=(lock.fileno(),))
-        update_state(receipt_path, worker_pid=proc.pid, handoff_at_ns=now())
+        with receipt_path.with_suffix(".log").open("a", encoding="utf-8") as stream:
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", "--receipt", str(receipt_path),
+                                     "--lock-fd", str(lock.fileno())], stdin=subprocess.DEVNULL, stdout=stream,
+                                    stderr=subprocess.STDOUT, start_new_session=True, close_fds=True, pass_fds=(lock.fileno(),))
     finally:
-        lock.close()  # inherited descriptor preserves the flock in the worker.
-    print(json.dumps({"run_id": run_id, "receipt": str(receipt_path), "worker_pid": proc.pid,
-                      "expected_sha": expected_sha}))
+        lock.close()
+    print(json.dumps({"run_id": run_id, "receipt": str(receipt_path), "worker_pid": proc.pid, **frozen}))
     return 0
 
 
@@ -314,41 +373,59 @@ def validate(args: argparse.Namespace) -> int:
     source, home = Path(args.source).resolve(), Path(args.home).resolve()
     origin = route_from_args(args)
     canonical_launcher(source)
-    expected_sha = freeze_target(source, args.expected_sha)
+    frozen = freeze_target(source, args.expected_sha)
     ok = exact_origin_exists(home, origin)
-    print(json.dumps({"origin": origin, "expected_sha": expected_sha, "exact_route_match": ok}))
+    print(json.dumps({"origin": origin, **frozen, "exact_route_match": ok}))
     return 0 if ok else 1
-
-
-def is_live_pid(pid: Any) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except (TypeError, ValueError, ProcessLookupError):
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def recover(args: argparse.Namespace) -> int:
     receipt_path = Path(args.receipt).resolve()
-    receipt = read_state(receipt_path)
-    if receipt["status"] not in _TERMINAL:
-        if is_live_pid(receipt.get("worker_pid")):
-            raise RuntimeError("supervisor worker is still live; refusing concurrent recovery")
-        finish(receipt_path, status="orphaned", error="orphaned worker; transaction state uncertain; never replayed")
-    deliver_completion(receipt_path, receipt_path.with_suffix(".log"))
+    lock = (receipt_path.parent / ".lock").open("a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        lock.close()
+        raise RuntimeError("supervisor transaction lock is held; refusing concurrent recovery") from exc
+    try:
+        receipt = read_state(receipt_path)
+        if receipt["status"] not in _TERMINAL:
+            finish(receipt_path, status="orphaned", error="worker lock absent; transaction state uncertain; never replayed")
+        deliver_completion(receipt_path, receipt_path.with_suffix(".log"))
+        print(json.dumps(read_state(receipt_path), sort_keys=True))
+        return 0 if read_state(receipt_path)["status"] == "succeeded" else 1
+    finally:
+        lock.close()
+
+
+def reconcile(args: argparse.Namespace) -> int:
+    receipt_path = Path(args.receipt).resolve()
+    if args.status not in {"failed", "orphaned"}:
+        raise ValueError("reconciliation status must be failed or orphaned")
+    lock = (receipt_path.parent / ".lock").open("a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        receipt = read_state(receipt_path)
+        if receipt["status"] != "uncertain":
+            raise RuntimeError("only an uncertain transaction can be reconciled")
+        finish(receipt_path, status=args.status, error="explicit manual reconciliation: " + args.note)
+    finally:
+        lock.close()
     print(json.dumps(read_state(receipt_path), sort_keys=True))
-    return 0 if read_state(receipt_path)["status"] == "succeeded" else 1
+    return 0
+
+
+def monitor(args: argparse.Namespace) -> int:
+    receipt = read_state(Path(args.receipt).resolve())
+    terminal = receipt.get("status") in _TERMINAL
+    print(json.dumps({"run_id": receipt["run_id"], "status": receipt["status"], "delivery_state": receipt.get("delivery_state"),
+                      "wakeAgent": terminal}))
+    return 0
 
 
 def add_origin_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--origin-platform")
-    parser.add_argument("--origin-chat-id")
-    parser.add_argument("--origin-thread-id")
-    parser.add_argument("--origin-parent-chat-id")
-    parser.add_argument("--origin-profile")
-    parser.add_argument("--origin-session-id")
+    for name in ("platform", "chat-id", "thread-id", "parent-chat-id", "profile", "session-id"):
+        parser.add_argument(f"--origin-{name}")
 
 
 def main() -> int:
@@ -364,24 +441,14 @@ def main() -> int:
     start_p.add_argument("--update-profile", required=True)
     start_p.add_argument("--update-timeout-s", type=float, default=3600.0)
     start_p.add_argument("--restart-timeout-s", type=float, default=1800.0)
-    worker_p = sub.add_parser("worker")
-    worker_p.add_argument("--receipt", required=True)
-    worker_p.add_argument("--lock-fd", type=int)
-    recover_p = sub.add_parser("recover")
-    recover_p.add_argument("--receipt", required=True)
-    validate_p = sub.add_parser("validate")
-    validate_p.add_argument("--source", required=True)
-    validate_p.add_argument("--home", required=True)
-    validate_p.add_argument("--expected-sha")
-    add_origin_flags(validate_p)
+    worker_p = sub.add_parser("worker"); worker_p.add_argument("--receipt", required=True); worker_p.add_argument("--lock-fd", type=int)
+    recover_p = sub.add_parser("recover"); recover_p.add_argument("--receipt", required=True)
+    reconcile_p = sub.add_parser("reconcile"); reconcile_p.add_argument("--receipt", required=True); reconcile_p.add_argument("--status", required=True); reconcile_p.add_argument("--note", required=True)
+    monitor_p = sub.add_parser("monitor"); monitor_p.add_argument("--receipt", required=True)
+    validate_p = sub.add_parser("validate"); validate_p.add_argument("--source", required=True); validate_p.add_argument("--home", required=True); validate_p.add_argument("--expected-sha"); add_origin_flags(validate_p)
     args = parser.parse_args()
-    if args.command == "start":
-        return start(args)
-    if args.command == "worker":
-        return worker(Path(args.receipt).resolve(), args.lock_fd)
-    if args.command == "validate":
-        return validate(args)
-    return recover(args)
+    return {"start": start, "worker": lambda a: worker(Path(a.receipt).resolve(), a.lock_fd), "validate": validate,
+            "recover": recover, "reconcile": reconcile, "monitor": monitor}[args.command](args)
 
 
 if __name__ == "__main__":
