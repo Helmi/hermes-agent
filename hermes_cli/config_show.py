@@ -179,10 +179,11 @@ def show_config():
     print(f"  Install:      {_cfg.get_project_root()}")
 
     _section("API Keys")
+    _secret_redact = _cfg._secret_redaction_enabled()
     for env_key, name in _SHOW_CONFIG_API_KEYS:
-        print(f"  {name:<14} {_cfg.redact_key(_cfg.get_env_value(env_key))}")
+        print(f"  {name:<14} {_cfg.secret_display_label(_cfg.get_env_value(env_key), redact=_secret_redact)}")
     from hermes_cli.auth import get_anthropic_key
-    print(f"  {'Anthropic':<14} {_cfg.redact_key(get_anthropic_key())}")
+    print(f"  {'Anthropic':<14} {_cfg.secret_display_label(get_anthropic_key(), redact=_secret_redact)}")
 
     _show_model_section(config)
     _show_display_section(config)

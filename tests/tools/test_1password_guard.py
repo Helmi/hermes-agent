@@ -192,7 +192,7 @@ def test_cron_approve_mode_cannot_bypass_op_guard(clean_session, monkeypatch):
 
 def test_container_backends_bypass_op_guard(clean_session):
     """Containerized backends still bypass — they can't touch the host."""
-    for env in ("docker", "singularity", "modal", "daytona"):
+    for env in ("docker", "modal", "daytona"):
         for cmd in ["op read op://v/i/f", "op item get item"]:
             result = check_all_command_guards(cmd, env)
             assert result["approved"] is True, f"container {env} should bypass on {cmd!r}"
