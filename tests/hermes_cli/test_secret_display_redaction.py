@@ -100,7 +100,7 @@ class TestShowConfigRedaction:
         monkeypatch.setenv("OPENROUTER_API_KEY", _DUMMY_OPENROUTER)
         monkeypatch.setenv("FIRECRAWL_API_KEY", _DUMMY_FIRECRAWL)
 
-        from hermes_cli.config import show_config
+        from hermes_cli.config_show import show_config
 
         show_config()
         out = capsys.readouterr().out
@@ -123,7 +123,7 @@ class TestShowConfigRedaction:
         _set_redact(False)
         monkeypatch.setenv("OPENROUTER_API_KEY", _DUMMY_OPENROUTER)
 
-        from hermes_cli.config import show_config
+        from hermes_cli.config_show import show_config
 
         show_config()
         out = capsys.readouterr().out

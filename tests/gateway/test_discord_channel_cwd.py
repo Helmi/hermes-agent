@@ -365,6 +365,8 @@ async def test_retry_preserves_channel_cwd(tmp_path):
         return "ok"
 
     handler._handle_message = _capture
+    handler._retry_readmission_reply = lambda *_: None
+    handler._retry_owned_store = lambda *_: None
 
     event = MessageEvent(
         text="/retry",
