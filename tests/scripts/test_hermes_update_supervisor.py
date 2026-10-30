@@ -153,8 +153,12 @@ def test_health_requires_live_pid_start_heartbeat_and_identity(supervisor, layou
 
 def test_restart_retries_only_the_explicit_busy_refusal(supervisor, layout, monkeypatch):
     source, home, _ = layout; attempts = []; sleeps = []
-    busy = ("Refusing to restart gateway: 1 live session(s) would be interrupted. "
-            "Let them finish before restarting; --yes interrupts.")
+    # Verbatim native refusal captured from a live restart (identifiers anonymized).
+    busy = ("✗ Refusing to restart the gateway: 2 live session(s) would be interrupted.\n"
+            "  • cron job 000000000000 (example) in-process pid 1234, running 16m25s\n"
+            "  • managed run pid 1234\n"
+            "  Let them finish, or interrupt them deliberately:\n"
+            "    hermes gateway restart --yes   # interrupts 2 live session(s)\n")
     outcomes = [(1, busy), (0, "restarted")]
     monkeypatch.setattr(supervisor, "run_command", lambda argv, **kwargs: attempts.append(argv) or outcomes.pop(0))
     monkeypatch.setattr(supervisor, "wait_for_health", lambda *_: {"ready": True})
@@ -173,14 +177,15 @@ def test_restart_refusal_does_not_retry_other_errors(supervisor, layout, monkeyp
     assert len(attempts) == 1
 
 
-def test_restart_health_readiness_is_short_and_bounded(supervisor, layout, monkeypatch):
+def test_restart_readiness_waits_through_the_drain_until_restart_deadline(supervisor, layout, monkeypatch):
+    # A drain-first restart returns before the old gateway exits; readiness must span the drain.
     source, home, _ = layout; deadlines = []
     monkeypatch.setattr(supervisor.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(supervisor, "run_command", lambda *_args, **_kwargs: (0, "restarted"))
+    monkeypatch.setattr(supervisor, "run_command", lambda *_args, **_kwargs: (0, "✓ Service restart requested"))
     monkeypatch.setattr(supervisor, "wait_for_health", lambda _home, _sha, deadline: deadlines.append(deadline) or {"ready": True})
     supervisor.restart_and_wait_for_health(source / ".hermes/bin/hermes", "hermie", home, "b" * 40,
                                            timeout=1800, log=home / "supervisor.log")
-    assert deadlines == [100.0 + supervisor._HEALTH_READINESS_TIMEOUT_S]
+    assert deadlines == [100.0 + 1800]
 
 
 def test_timeout_is_uncertain_and_blocks_new_transaction(supervisor, layout, monkeypatch):

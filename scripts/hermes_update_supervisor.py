@@ -169,13 +169,8 @@ def run_command(argv: list[str], *, timeout: float, log: Path, home: Path) -> tu
 
 
 _START_TIME_DRIFT_TOLERANCE = 200
-_HEALTH_READINESS_TIMEOUT_S = 60.0
-_BUSY_RESTART_REFUSAL = (
-    "Refusing to restart gateway:",
-    "live session(s) would be interrupted",
-    "Let them finish",
-    "--yes interrupts",
-)
+# Native drain-first restarts return before the old process exits; readiness may take as long as the drain.
+_BUSY_RESTART_REFUSAL = re.compile(r"Refusing to restart the gateway: \d+ live session\(s\) would be interrupted")
 
 
 def process_start_time(pid: int) -> int | None:
@@ -197,7 +192,7 @@ def start_times_match(recorded: Any, current: Any) -> bool:
 
 def is_busy_restart_refusal(code: int, output: str) -> bool:
     """Only retry the native drain guard; every other restart failure is terminal."""
-    return code != 0 and all(fragment in output for fragment in _BUSY_RESTART_REFUSAL)
+    return code != 0 and _BUSY_RESTART_REFUSAL.search(output) is not None
 
 
 def parse_updated_at(value: Any) -> float | None:
@@ -254,8 +249,7 @@ def restart_and_wait_for_health(launcher: Path, profile: str, home: Path, expect
         code, output = run_command([str(launcher), "-p", profile, "gateway", "restart"],
                                    timeout=min(remaining, 120.0), log=log, home=home)
         if code == 0:
-            readiness_deadline = time.monotonic() + min(timeout, _HEALTH_READINESS_TIMEOUT_S)
-            return wait_for_health(home, expected_sha, readiness_deadline)
+            return wait_for_health(home, expected_sha, deadline)
         if not is_busy_restart_refusal(code, output):
             raise RuntimeError(f"gateway restart exited {code}")
         sleep_for = min(backoff, max(0.0, deadline - time.monotonic()))
