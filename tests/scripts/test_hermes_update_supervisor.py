@@ -233,3 +233,25 @@ def test_monitor_wakes_only_for_terminal_receipt(supervisor, layout, capsys):
     supervisor.finish(path, status="failed", error="x")
     supervisor.monitor(Namespace(receipt=str(path)))
     assert json.loads(capsys.readouterr().out)["wakeAgent"] is True
+
+
+def test_exported_copy_outside_checkout_reads_live_start_time(tmp_path):
+    """The daily job runs an exported copy where ``hermes_cli`` is not importable."""
+    import os
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "hermes_update_supervisor.py"
+    copy = tmp_path / "hermes_update_supervisor.py"
+    copy.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    probe = (
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('s', {str(copy)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "import importlib; assert importlib.util.find_spec('hermes_cli') is None\n"
+        "print(m.process_start_time(os.getpid()))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    out = subprocess.run([sys.executable, "-I", "-c", probe], cwd=tmp_path, env=env,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert out.isdigit(), out

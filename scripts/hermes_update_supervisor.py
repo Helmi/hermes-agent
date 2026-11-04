@@ -174,12 +174,27 @@ _BUSY_RESTART_REFUSAL = re.compile(r"Refusing to restart the gateway: \d+ live s
 
 
 def process_start_time(pid: int) -> int | None:
-    """Return the native, clock-step-stable process-birth fingerprint."""
+    """Return the native, clock-step-stable process-birth fingerprint.
+
+    The supervisor runs from an exported copy outside the checkout, so ``hermes_cli`` is often not
+    importable; fall back to psutil's create time (same centisecond scale, within drift tolerance).
+    """
     try:
         import psutil  # type: ignore
+    except ImportError:
+        return None
+    try:
+        process = psutil.Process(pid)
+    except psutil.Error:
+        return None
+    try:
         from hermes_cli.process_identity import process_birth
-        return round(process_birth(psutil.Process(pid)) * 100)
+        return round(process_birth(process) * 100)
     except Exception:
+        pass
+    try:
+        return round(process.create_time() * 100)
+    except psutil.Error:
         return None
 
 
