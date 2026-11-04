@@ -20,7 +20,6 @@ from typing import Any, Optional
 from hermes_constants import get_hermes_home
 from agent.skill_utils import iter_skill_index_files
 
-_SKIP_PARTS = {".archive", ".hub", ".locks", "node_modules", ".git"}
 _USAGE_TS_KEYS = ("last_activity_at", "last_used_at", "last_viewed_at", "last_patched_at", "created_at")
 
 
