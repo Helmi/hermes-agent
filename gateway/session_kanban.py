@@ -37,6 +37,14 @@ def build_kanban_policy(connection, params, config):
                 raise RuntimeStoreError('stale_kanban_claim')
             if Path(resolve_profile_env(task.assignee)).resolve() != Path(authority.profile_id).resolve():
                 raise RuntimeStoreError('profile_mismatch')
+            # The assigned profile owns the worker route.  Apply its opt-in
+            # background policy before building the ordinary session policy so
+            # an unpinned task can never inherit an interactive Claude default.
+            from hermes_cli.kanban_model_policy import KanbanModelPolicyError, resolve_worker_route
+            try:
+                worker_route = resolve_worker_route(task, config)
+            except KanbanModelPolicyError as exc:
+                raise RuntimeStoreError(str(exc)) from exc
             bound = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' ORDER BY id DESC LIMIT 1",
                                  (task.id, task.current_run_id)).fetchone()
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
@@ -53,6 +61,8 @@ def build_kanban_policy(connection, params, config):
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
+    if worker_route is not None:
+        params_policy.update(model=worker_route.model, provider=worker_route.provider)
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
