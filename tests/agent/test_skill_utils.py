@@ -484,21 +484,23 @@ class TestBOMToleranceSiblingSites:
     def test_blueprints_split_frontmatter_bom(self):
         # str.lstrip() does NOT strip U+FEFF (it is not whitespace), so the
         # pre-existing lstrip() in _split_frontmatter never covered it.
-        from tools.blueprints import _split_frontmatter
+        from cron.skill_blueprints import _split_frontmatter
 
         fm = _split_frontmatter("\ufeff---\nname: bp\n---\nbody")
         assert fm is not None
         assert fm.get("name") == "bp"
 
     def test_skills_hub_parsers_accept_bom(self):
-        # Upstream split the skills hub into skills_hub_github / skills_hub_official;
-        # the BOM-tolerant parsers now live there.
-        from tools.skills_hub_github import GitHubSource
-        from tools.skills_hub_official import OptionalSkillSource
+        # Upstream consolidated the BOM-tolerant frontmatter parser into
+        # skills_hub_models; the GitHub and optional-skill sources both use it.
+        import tools.skills_hub_github as gh_mod
+        import tools.skills_hub_official as official_mod
+        from tools.skills_hub_models import _parse_frontmatter
 
         for parser in (
-            GitHubSource._parse_frontmatter_quick,
-            OptionalSkillSource._parse_frontmatter,
+            gh_mod._parse_frontmatter,
+            _parse_frontmatter,
+            official_mod._parse_frontmatter,
         ):
             fm = parser("\ufeff" + self.SKILL)
             assert fm.get("name") == "bom-skill", parser.__qualname__
