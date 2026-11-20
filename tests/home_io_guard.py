@@ -23,6 +23,22 @@ def _pm_generation_dirs(prefixes) -> set[Path]:
     return found
 
 
+def _checkout_git_dirs() -> set[Path]:
+    """The git dir of a linked worktree under this checkout. A worktree's ``.git`` is a FILE
+    pointing at the main checkout's ``.git/worktrees/<name>`` — which sits inside the real home —
+    but ``hermes update``'s interrupted-pull journal probe stats that git dir on the first
+    ``gateway.run`` import, and git metadata is the checkout's own state, not Hermes state."""
+    dot_git = Path(__file__).resolve().parent.parent / ".git"
+    try:
+        if dot_git.is_file():
+            first = dot_git.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
+            if first.startswith("gitdir:"):
+                return {Path(first[len("gitdir:"):].strip()).resolve()}
+    except OSError:
+        pass
+    return set()
+
+
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
@@ -42,7 +58,7 @@ _INTERPRETER_PREFIXES = tuple({
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
-})
+} | _checkout_git_dirs())
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.

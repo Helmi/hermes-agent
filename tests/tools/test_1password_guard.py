@@ -203,8 +203,9 @@ def test_container_backends_bypass_op_guard(clean_session):
 # -------------------------------------------------------------------------
 
 def test_hardline_list_stays_small():
-    """Adding 1Password patterns must not push the list past 20."""
-    assert len(HARDLINE_PATTERNS) <= 20, (
+    """Adding 1Password patterns must not push the list past 22 (v0.23.3 widened upstream's
+    Windows hardline splat; the floor is for catching runaway additions, not upstream churn)."""
+    assert len(HARDLINE_PATTERNS) <= 22, (
         f"HARDLINE_PATTERNS has {len(HARDLINE_PATTERNS)} entries; "
         "only truly unrecoverable commands belong here."
     )
