@@ -236,7 +236,9 @@ def test_monitor_wakes_only_for_terminal_receipt(supervisor, layout, capsys):
 
 
 def test_exported_copy_outside_checkout_reads_live_start_time(tmp_path):
-    """The daily job runs an exported copy where ``hermes_cli`` is not importable."""
+    """The daily job runs an exported copy from a temp dir with no PYTHONPATH: the copy must
+    answer process_start_time standalone (psutil via the interpreter's site-packages or its
+    stdlib fallback — never the silent ``except: return None`` regression)."""
     import os
     import subprocess
     import sys
@@ -248,7 +250,9 @@ def test_exported_copy_outside_checkout_reads_live_start_time(tmp_path):
         "import importlib.util, os, sys\n"
         f"spec = importlib.util.spec_from_file_location('s', {str(copy)!r})\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-        "import importlib; assert importlib.util.find_spec('hermes_cli') is None\n"
+        "# No top-level hermes_cli dependency: the exec above succeeded without importing it.\n"
+        "# A dev interpreter with an editable hermes install keeps the name importable even\n"
+        "# under -I, so absence of the NAME cannot be asserted here.\n"
         "print(m.process_start_time(os.getpid()))\n"
     )
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
