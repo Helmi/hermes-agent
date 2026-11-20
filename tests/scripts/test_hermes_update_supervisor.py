@@ -188,6 +188,83 @@ def test_restart_readiness_waits_through_the_drain_until_restart_deadline(superv
     assert deadlines == [100.0 + 1800]
 
 
+def multiplex_layout(tmp_path):
+    """Profiles hermie+default live under <tmp>/profiles/<name>; the host root is <tmp>."""
+    source, _, state = tmp_path / "source", None, tmp_path / "state"
+    launcher = source / ".hermes" / "bin" / "hermes"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    home = tmp_path / "profiles" / "hermie"
+    home.mkdir(parents=True)
+    return source, home, state
+
+
+def install_host_state(tmp_path, *, sha="a" * 40, served=("hermie", "mia"), state="running", pid=None, start=123):
+    payload = {"gateway_state": state, "code_sha": sha, "pid": pid if pid is not None else os.getpid(),
+               "start_time": start, "updated_at": "2030-01-01T00:00:00+00:00", "served_profiles": list(served)}
+    (tmp_path / "gateway_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "gateway.pid").write_text(json.dumps({"pid": pid if pid is not None else os.getpid(),
+                                                      "start_time": start, "hermes_home": str(tmp_path)}),
+                                          encoding="utf-8")
+    return payload
+
+
+def test_multiplex_detection_requires_running_fresh_host_serving_every_profile(supervisor, tmp_path, monkeypatch):
+    _, home, _ = multiplex_layout(tmp_path)
+    install_host_state(tmp_path, served=("hermie",))
+    assert supervisor.multiplex_serves_all(home, ["hermie", "mia"]) is False
+    install_host_state(tmp_path, served=("hermie", "mia"), state="draining")
+    assert supervisor.multiplex_serves_all(home, ["hermie", "mia"]) is False
+    install_host_state(tmp_path, served=("hermie", "mia"))
+    assert supervisor.multiplex_serves_all(home, ["hermie", "mia"]) is True
+    (tmp_path / "gateway_state.json").unlink()
+    assert supervisor.multiplex_serves_all(home, ["hermie", "mia"]) is False
+
+
+def test_host_health_requires_served_profiles_and_expected_code(supervisor, tmp_path, monkeypatch):
+    _, home, _ = multiplex_layout(tmp_path)
+    install_host_state(tmp_path, sha="a" * 40, served=("hermie",))
+    with pytest.raises(RuntimeError, match="serve required profiles"):
+        supervisor.host_health_record(home, "b" * 40, ["hermie", "mia"])
+    install_host_state(tmp_path, sha="a" * 40, served=("hermie", "mia"))
+    with pytest.raises(RuntimeError, match="does not equal expected"):
+        supervisor.host_health_record(home, "b" * 40, ["hermie", "mia"])
+    install_host_state(tmp_path, sha="b" * 40, served=("hermie", "mia"))
+    monkeypatch.setattr(supervisor, "process_start_time", lambda _: 123)
+    record = supervisor.host_health_record(home, "b" * 40, ["hermie", "mia"])
+    assert record["hermes_home"] == str(tmp_path) and record["served_profiles"] == ["hermie", "mia"]
+    with pytest.raises(RuntimeError, match="identity"):
+        install_host_state(tmp_path, sha="b" * 40, served=("hermie", "mia"), start=999)
+        supervisor.host_health_record(home, "b" * 40, ["hermie", "mia"])
+
+
+def test_worker_restarts_the_host_once_when_it_multiplex_serves_the_profiles(supervisor, tmp_path, monkeypatch):
+    source, home, state = multiplex_layout(tmp_path)
+    path = receipt(supervisor, state, source, home, profiles=["hermie", "mia"])
+    install_host_state(tmp_path, served=("hermie", "mia"))
+    calls = []
+    monkeypatch.setattr(supervisor, "git", lambda *_: "" if _[-1] == "--porcelain" else "b" * 40)
+    monkeypatch.setattr(supervisor, "fork_main_sha", lambda _: "b" * 40)
+    monkeypatch.setattr(supervisor, "exact_origin_exists", lambda *_: False)
+    def fake_run(argv, *, timeout, log, home):
+        calls.append((argv, str(home)))
+        return 0, "restarted"
+    monkeypatch.setattr(supervisor, "run_command", fake_run)
+    monkeypatch.setattr(supervisor, "wait_for_host_health",
+                        lambda _home, _sha, _profiles, _deadline: {"code_sha": "b" * 40})
+    assert supervisor.worker(path) == 0  # exact origin missing -> delivery refused, but the run succeeded
+    data = supervisor.read_state(path)
+    assert data["status"] == "succeeded"
+    assert data["gateway_results"]["host"]["health"]["code_sha"] == "b" * 40
+    restarts = [(argv, home_) for argv, home_ in calls if argv[-1] == "restart"]
+    updates = [(argv, home_) for argv, home_ in calls if argv[-1] != "restart"]
+    assert len(restarts) == 1
+    argv, run_home = restarts[0]
+    assert argv[-2:] == ["gateway", "restart"] and argv[-4:-2] == ["-p", "default"]
+    assert run_home == str(tmp_path)
+    assert len(updates) == 1 and updates[0][0][-1] == "--no-gateway-restart"
+
+
 def test_timeout_is_uncertain_and_blocks_new_transaction(supervisor, layout, monkeypatch):
     source, home, state = layout; path = receipt(supervisor, state, source, home)
     monkeypatch.setattr(supervisor, "git", lambda *_: "" if _[-1] == "--porcelain" else "b" * 40)

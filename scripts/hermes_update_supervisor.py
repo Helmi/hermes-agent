@@ -253,6 +253,86 @@ def wait_for_health(home: Path, expected_sha: str, deadline: float) -> dict[str,
     raise RuntimeError(last_error)
 
 
+def multiplex_serves_all(origin_home: Path, profiles: list[str], *, max_age_s: float = 300) -> bool:
+    """True when the default host gateway (HERMES_HOME root) currently serves every target profile.
+
+    Since the multiplex fold, named profiles' per-profile gateway_state.json files go stale
+    (state ``stopped``); only the host state carries live code_sha/heartbeat for them.
+    """
+    host_home = origin_home.parents[1]
+    try:
+        state = json.loads((host_home / "gateway_state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(state, dict) or state.get("gateway_state") != "running":
+        return False
+    updated_at = parse_updated_at(state.get("updated_at"))
+    if updated_at is None or time.time() - updated_at > max_age_s:
+        return False
+    served = state.get("served_profiles")
+    return isinstance(served, list) and set(profiles).issubset(set(served))
+
+
+def host_health_record(origin_home: Path, expected_sha: str, profiles: list[str], *, max_age_s: float = 120) -> dict[str, Any]:
+    host_home = origin_home.parents[1]
+    try:
+        state = json.loads((host_home / "gateway_state.json").read_text(encoding="utf-8"))
+        pid_record = json.loads((host_home / "gateway.pid").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError("host gateway runtime status is unavailable") from None
+    if not isinstance(state, dict) or state.get("gateway_state") != "running":
+        raise RuntimeError(f"host gateway is not ready (state={state.get('gateway_state') if isinstance(state, dict) else None!r})")
+    served = state.get("served_profiles")
+    if not isinstance(served, list) or not set(profiles).issubset(set(served)):
+        missing = sorted(set(profiles) - set(served or []))
+        raise RuntimeError(f"host gateway does not serve required profiles: missing {missing!r}")
+    if state.get("code_sha") != expected_sha:
+        raise RuntimeError(f"host gateway code SHA {state.get('code_sha')!r} does not equal expected {expected_sha}")
+    pid, state_start, pid_start = state.get("pid"), state.get("start_time"), pid_record.get("start_time")
+    if (not isinstance(pid, int) or pid_record.get("pid") != pid
+            or not start_times_match(state_start, pid_start)
+            or not start_times_match(pid_start, process_start_time(pid))):
+        raise RuntimeError("host gateway PID/start-time identity is not live")
+    updated_at = parse_updated_at(state.get("updated_at"))
+    if updated_at is None or time.time() - updated_at > max_age_s:
+        raise RuntimeError("host gateway heartbeat is stale or invalid")
+    return {key: state.get(key) for key in ("pid", "start_time", "updated_at", "code_sha", "code_version", "served_profiles")} | {"hermes_home": pid_record["hermes_home"]}
+
+
+def wait_for_host_health(origin_home: Path, expected_sha: str, profiles: list[str], deadline: float) -> dict[str, Any]:
+    last_error = "host gateway readiness deadline elapsed"
+    while time.monotonic() < deadline:
+        try:
+            return host_health_record(origin_home, expected_sha, profiles)
+        except RuntimeError as exc:
+            last_error = str(exc)
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(last_error)
+
+
+def restart_host_and_wait_for_health(launcher: Path, origin_home: Path, expected_sha: str, profiles: list[str],
+                                     *, timeout: float, log: Path) -> dict[str, Any]:
+    """Restart the multiplex host gateway (drain-first), then wait for it to serve the new code."""
+    host_home = origin_home.parents[1]
+    deadline = time.monotonic() + timeout
+    backoff = 1.0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("host gateway restart remained busy until its bounded deadline")
+        code, output = run_command([str(launcher), "-p", "default", "gateway", "restart"],
+                                   timeout=min(remaining, 120.0), log=log, home=host_home)
+        if code == 0:
+            return wait_for_host_health(origin_home, expected_sha, profiles, deadline)
+        if not is_busy_restart_refusal(code, output):
+            raise RuntimeError(f"host gateway restart exited {code}")
+        sleep_for = min(backoff, max(0.0, deadline - time.monotonic()))
+        if sleep_for <= 0:
+            raise RuntimeError("host gateway restart remained busy until its bounded deadline")
+        time.sleep(sleep_for)
+        backoff = min(backoff * 2, 15.0)
+
+
 def restart_and_wait_for_health(launcher: Path, profile: str, home: Path, expected_sha: str, *, timeout: float, log: Path) -> dict[str, Any]:
     """Respect the native drain guard, retrying only its explicit busy refusal."""
     deadline = time.monotonic() + timeout
@@ -352,15 +432,27 @@ def worker(receipt_path: Path, inherited_lock_fd: int | None = None) -> int:
         if git(source, "rev-parse", "HEAD") != receipt["expected_sha"]:
             raise RuntimeError("installed source SHA does not equal frozen expected SHA")
         results: dict[str, Any] = {}
-        for profile in receipt["profiles"]:
-            target_home = profile_home(home, receipt["origin"]["profile"], profile)
+        if multiplex_serves_all(home, receipt["profiles"]):
+            # Multiplex fold: the host process owns the served profiles; per-profile
+            # restarts only re-serve stale in-process modules. One host restart loads
+            # the new code for every served profile at once.
             try:
-                health = restart_and_wait_for_health(canonical_launcher(source), profile, target_home,
-                                                     receipt["expected_sha"], timeout=receipt["restart_timeout_s"],
-                                                     log=log)
-                results[profile] = {"health": health}
+                health = restart_host_and_wait_for_health(canonical_launcher(source), home,
+                                                          receipt["expected_sha"], receipt["profiles"],
+                                                          timeout=receipt["restart_timeout_s"], log=log)
+                results["host"] = {"health": health}
             except Exception as exc:
-                results[profile] = {"error": str(exc)}
+                results["host"] = {"error": str(exc)}
+        else:
+            for profile in receipt["profiles"]:
+                target_home = profile_home(home, receipt["origin"]["profile"], profile)
+                try:
+                    health = restart_and_wait_for_health(canonical_launcher(source), profile, target_home,
+                                                         receipt["expected_sha"], timeout=receipt["restart_timeout_s"],
+                                                         log=log)
+                    results[profile] = {"health": health}
+                except Exception as exc:
+                    results[profile] = {"error": str(exc)}
         update_state(receipt_path, gateway_results=results)
         failures = {p: value["error"] for p, value in results.items() if "error" in value}
         if failures:
