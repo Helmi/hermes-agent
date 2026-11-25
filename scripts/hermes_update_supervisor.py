@@ -321,7 +321,7 @@ def restart_host_and_wait_for_health(launcher: Path, origin_home: Path, expected
         if remaining <= 0:
             raise RuntimeError("host gateway restart remained busy until its bounded deadline")
         code, output = run_command([str(launcher), "-p", "default", "gateway", "restart"],
-                                   timeout=min(remaining, 120.0), log=log, home=host_home)
+                                   timeout=min(remaining, 600.0), log=log, home=host_home)
         if code == 0:
             return wait_for_host_health(origin_home, expected_sha, profiles, deadline)
         if not is_busy_restart_refusal(code, output):
@@ -342,7 +342,7 @@ def restart_and_wait_for_health(launcher: Path, profile: str, home: Path, expect
         if remaining <= 0:
             raise RuntimeError("gateway restart remained busy until its bounded deadline")
         code, output = run_command([str(launcher), "-p", profile, "gateway", "restart"],
-                                   timeout=min(remaining, 120.0), log=log, home=home)
+                                   timeout=min(remaining, 600.0), log=log, home=home)
         if code == 0:
             return wait_for_health(home, expected_sha, deadline)
         if not is_busy_restart_refusal(code, output):
