@@ -57,11 +57,7 @@ def build_kanban_policy(connection, params, config):
         raise AuthorityRefusal('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     private = {}
-    policy = kanban_launch_policy(task, cwd, config, private)
-    # Fork: the assigned profile's opt-in background model policy wins over the
-    # generic launch policy, as before the kanban_launch_policy extraction.
-    if worker_route is not None:
-        policy = replace(policy, model=worker_route.model, provider=worker_route.provider)
+    policy = kanban_launch_policy(task, cwd, config, private, worker_route=worker_route)
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
@@ -74,7 +70,7 @@ def build_kanban_policy(connection, params, config):
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
 
 
-def kanban_launch_policy(task, cwd, config, private=None):
+def kanban_launch_policy(task, cwd, config, private=None, *, worker_route=None):
     """The launch policy a claimed card runs, its model resolved by ``task_model`` (shared with the
     dispatcher's pre-spawn refusal). Refuses ``invalid_params`` (field ``model``) only when nothing
     can name one, before a receipt or a worker exists."""
@@ -84,6 +80,11 @@ def kanban_launch_policy(task, cwd, config, private=None):
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params[name] = value
+    # Fork: apply the already-validated background route through the ordinary
+    # builder. Provider is config-backed, not a LocalSessionPolicy field; the
+    # builder also drops endpoint/credential pins belonging to the old route.
+    if worker_route is not None:
+        params.update(model=worker_route.model, provider=worker_route.provider)
     policy = build_policy(params, config, private_secrets={} if private is None else private)
     if policy.model is None:
         model, unresolved = task_model(task, config)
